@@ -1,0 +1,24 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "archon statusline",
+    "refreshInterval": 5
+  },
+  "hooks": {
+    "PermissionRequest": [
+      { "matcher": ".*", "hooks": [{ "type": "command", "command": "archon hook PermissionRequest" }] }
+    ],
+    "Notification": [
+      { "matcher": ".*", "hooks": [{ "type": "command", "command": "archon hook Notification" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "archon hook Stop" }] }
+    ],
+    "StopFailure": [
+      { "hooks": [{ "type": "command", "command": "archon hook StopFailure" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "archon hook SessionEnd" }] }
+    ]
+  }
+}

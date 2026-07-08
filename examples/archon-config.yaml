@@ -1,0 +1,36 @@
+version: 1
+
+startup:
+  show_provider_wizard: auto        # auto | always | never
+  provider_panes: launch_now        # launch_now | spawn_on_task
+  default_task_provider_policy: ask_if_multiple
+
+providers:
+  claude:
+    enabled: true
+    display_name: Claude Code CLI
+    command: claude
+    default_mode: interactive
+    login_command: claude
+    telemetry: claude_statusline_hooks
+
+  codex:
+    enabled: true
+    display_name: OpenAI Codex CLI
+    command: codex
+    default_mode: exec
+    login_command: codex login
+    exec_args: [exec, --json, --sandbox, workspace-write]
+    review_args: [exec, --json, --sandbox, read-only]
+    telemetry: jsonl_stdout
+
+  copilot:
+    enabled: false
+    display_name: GitHub Copilot CLI
+    command: copilot
+    default_mode: interactive
+    login_command: copilot login
+    prompt_args: ["-p"]
+    telemetry: stdout_text
+
+custom: []

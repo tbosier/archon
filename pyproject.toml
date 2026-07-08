@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "archon"
+version = "0.1.0"
+description = "A Zellij-native command center for orchestrating parallel AI coding agents."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Archon contributors" }]
+keywords = ["zellij", "ai", "cli", "orchestration", "claude", "codex", "copilot"]
+dependencies = [
+  "typer>=0.12",
+  "rich>=13.7",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "questionary>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+]
+
+[project.scripts]
+archon = "archon.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/tbosier/archon"
+Repository = "https://github.com/tbosier/archon"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/archon"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]

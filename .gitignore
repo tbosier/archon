@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Archon local state (never commit a user's data dir)
+*.db
+events.jsonl
+hooks.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

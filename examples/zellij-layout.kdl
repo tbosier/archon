@@ -1,0 +1,23 @@
+// Example Zellij layout for an Archon cockpit.
+// Archon normally creates panes dynamically; this is a reference starting point.
+layout {
+    tab name="archon" focus=true {
+        pane split_direction="vertical" {
+            pane size="65%" {
+                name "dashboard"
+                command "archon"
+                args "tui" "--inside-zellij"
+            }
+            pane split_direction="horizontal" {
+                pane {
+                    name "git"
+                    command "bash"
+                }
+                pane {
+                    name "logs"
+                    command "bash"
+                }
+            }
+        }
+    }
+}
