@@ -12,7 +12,7 @@ import shlex
 import shutil
 from pathlib import Path
 
-from ..config import CustomProviderConfig
+from ..config import CustomProviderConfig, ModelTier, ProviderModels
 from ..models import AuthStatus, TaskRun
 from .base import LaunchPurpose, ProviderEvent, ProviderLaunch, archon_env
 
@@ -28,6 +28,8 @@ class CustomProvider:
             shlex.split(config.login_command) if config.login_command else None
         )
         self._paste = config.prompt_delivery == "paste"
+        # Set by the registry when a config is available; None means no tiering.
+        self.models: ProviderModels | None = None
 
     # -- detection ----------------------------------------------------------
 
@@ -56,13 +58,20 @@ class CustomProvider:
     def worker_launch(
         self, task_run: TaskRun, prompt: str, *, purpose: LaunchPurpose = "worker"
     ) -> ProviderLaunch:
+        from .. import phases
+
         cwd = task_run.worktree or Path.cwd()
         env = archon_env(task_run)
         pane = task_run.zellij_pane_name
+        phase = getattr(task_run, "phase", None) or "execute"
+        tier = self.models.for_phase(phase) if self.models else ModelTier()
+        extra = phases.model_args(self.id, tier)
+        if tier.model is not None:
+            task_run.model = tier.model
         if self._paste:
             # Interactive: launch bare command and paste the prompt in.
             return ProviderLaunch(
-                argv=[self.command],
+                argv=[self.command, *extra],
                 cwd=cwd,
                 env=env,
                 mode=self.default_mode,
@@ -73,7 +82,7 @@ class CustomProvider:
             )
         # Non-interactive: prompt travels as an argv element.
         return ProviderLaunch(
-            argv=[self.command, prompt],
+            argv=[self.command, *extra, prompt],
             cwd=cwd,
             env=env,
             mode=self.default_mode,

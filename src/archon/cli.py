@@ -14,9 +14,19 @@ from typing import Optional
 import typer
 from rich.console import Console
 
-from . import db, dispatcher, hooks, statusline, transcript_index
+from . import (
+    budget,
+    db,
+    dispatcher,
+    hooks,
+    queue,
+    scheduler,
+    statusline,
+    taskgraph,
+    transcript_index,
+)
 from .config import Config, load_config, save_config
-from .models import Provider
+from .models import Provider, Worker
 from .paths import resolve_paths
 from .provider_health import check_all
 from .provider_login import login_launch_for, login_pane_name
@@ -201,18 +211,24 @@ def up(
         launch_now = False
 
     console.print(f"[cyan]archon up[/cyan]  repo={ctx.root}  session={ctx.session}  dry_run={dry}")
+    health_all = check_all(known_providers())
     for pid in config.enabled_provider_ids():
-        health = check_all(known_providers()).get(pid)
+        health = health_all.get(pid)
         if health and not health.installed:
             console.print(f"  [yellow]{pid}: not installed[/yellow] — install it, then `archon providers refresh`")
             continue
+        # Register an idle worker in the pool for each ready provider.
+        per_provider = config.scheduler.per_provider_concurrency
+        db.upsert_worker(conn, Worker(id=f"{pid}-w1", provider_id=pid,
+                                      zellij_session=ctx.session, state="idle",
+                                      max_concurrency=per_provider))
         if health and health.auth_status == "needs_login":
             launch = login_launch_for(pid, config, repo=ctx.root)
             zellij.new_pane(ctx.session, login_pane_name(pid), str(ctx.root),
                             ["bash", "-lc", " ".join(launch.argv)])
             console.print(f"  [yellow]{pid}: opened login pane[/yellow] ({login_pane_name(pid)})")
         elif launch_now:
-            console.print(f"  [green]{pid}: ready[/green] (worker pane)")
+            console.print(f"  [green]{pid}: ready[/green] (idle worker)")
         else:
             console.print(f"  [dim]{pid}: will spawn on task[/dim]")
 
@@ -334,9 +350,14 @@ def feature(
     base: Optional[str] = typer.Option(None, "--base"),
     prompt: Optional[str] = typer.Option(None, "--prompt"),
     variants: bool = typer.Option(False, "--variants"),
+    now: bool = typer.Option(False, "--now", help="Dispatch immediately, skip the plan→execute queue."),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
-    """Dispatch a feature implementation (single writer unless --variants)."""
+    """Queue a feature as plan → execute (→ review → test on completion).
+
+    A single provider gets the model-tiered chain; `--variants` runs multiple
+    providers as immediate parallel variant branches instead.
+    """
     paths, conn, config = _open()
     dry = is_dry_run(dry_run)
     ctx = dispatcher.register_repo(conn, dispatcher.resolve_repo_context(repo))
@@ -344,15 +365,35 @@ def feature(
         config, provider or [], all_providers=False, ask=True,
         kind="feature", variants=variants,
     )
-    try:
-        result = dispatcher.start_feature(
-            conn, config, ctx=ctx, feature_name=name, provider_ids=provider_ids,
-            branch=branch, base=base, prompt_text=prompt, variants=variants, dry_run=dry,
-        )
-    except dispatcher.DispatchError as exc:
-        err.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1)
-    _print_dispatch(result, dry)
+
+    # Variants (or explicit --now) use the immediate multi-writer path.
+    if len(provider_ids) > 1 or now:
+        try:
+            result = dispatcher.start_feature(
+                conn, config, ctx=ctx, feature_name=name, provider_ids=provider_ids,
+                branch=branch, base=base, prompt_text=prompt, variants=variants, dry_run=dry,
+            )
+        except dispatcher.DispatchError as exc:
+            err.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+        _print_dispatch(result, dry)
+        return
+
+    # Single provider: enqueue the model-tiered chain and dispatch what's ready.
+    chain = dispatcher.enqueue_feature(
+        conn, config, ctx, feature_name=name, provider_id=provider_ids[0], prompt_text=prompt
+    )
+    launch = dispatcher.make_scheduler_launch(Zellij(dry_run=dry), dry)
+    decision = scheduler.tick(conn, config, launch=launch, budget_policy=budget.policy)
+
+    tag = "[yellow](dry-run)[/yellow] " if dry else ""
+    console.print(f"{tag}[bold]{name}[/bold] queued as a plan → execute → review → test chain")
+    plan_t, exec_t = chain.get("plan"), chain.get("execute")
+    if plan_t:
+        console.print(f"  plan     {plan_t.id}  [cyan]{provider_ids[0]}[/cyan] (strong model)")
+    console.print(f"  execute  {exec_t.id}  [cyan]{provider_ids[0]}[/cyan] (execute model)")
+    console.print(f"  [dim]dispatched now:[/dim] {', '.join(decision.dispatched) or '(waiting)'}")
+    console.print("  [dim]run `archon complete <task>` as phases finish, or `archon schedule --watch`.[/dim]")
 
 
 def _print_dispatch(result: dispatcher.DispatchResult, dry: bool) -> None:
@@ -452,6 +493,122 @@ def touched(file_path: str) -> None:
         return
     for r in rows:
         console.print(f"{r.get('task_run_id','-')} | {r.get('provider_id','-')} | {r.get('action','-')} | {r.get('file_path')}")
+
+
+# --------------------------------------------------------------------------- #
+# Queue / scheduler / budget
+# --------------------------------------------------------------------------- #
+
+@app.command("queue")
+def queue_cmd() -> None:
+    """Show queued and ready tasks."""
+    _, conn, _ = _open()
+    ready = {r["id"] for r in queue.ready_tasks(conn)}
+    rows = [t for t in db.list_tasks(conn) if t["status"] == "queued"]
+    if not rows:
+        console.print("[dim]queue empty[/dim]")
+        return
+    console.print(f"[bold]{len(rows)} queued[/bold] ({len(ready)} ready to dispatch)")
+    for t in rows:
+        state = "[green]ready[/green]" if t["id"] in ready else "[yellow]waiting on deps[/yellow]"
+        console.print(f"  {t['id']}  {t['phase']:<7} {t['name']:<28} {t['provider_id'] or '-':<8} {state}")
+
+
+@app.command()
+def graph() -> None:
+    """Render the task dependency graph (plan → execute → review → test)."""
+    _, conn, _ = _open()
+    cycle = taskgraph.detect_cycle(conn)
+    if cycle:
+        err.print(f"[red]dependency cycle detected:[/red] {' → '.join(cycle)}")
+    text = taskgraph.ascii_graph(conn)
+    console.print(text if text.strip() else "[dim]no tasks yet[/dim]")
+
+
+@app.command("budget")
+def budget_cmd() -> None:
+    """Show the current budget / rate-limit status and dispatch action."""
+    _, conn, config = _open()
+    status = budget.evaluate(conn, config)
+    color = {"allow": "green", "prefer_small": "yellow", "no_new_impl": "yellow", "pause": "red"}
+    console.print(f"[{color.get(status.action,'white')}]{budget.describe(status)}[/]")
+
+
+@app.command()
+def schedule(
+    watch: bool = typer.Option(False, "--watch", help="Keep dispatching on an interval."),
+    interval: float = typer.Option(3.0, "--interval"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Dispatch ready tasks, gated by concurrency and the budget policy."""
+    _, conn, config = _open()
+    dry = is_dry_run(dry_run)
+    launch = dispatcher.make_scheduler_launch(Zellij(dry_run=dry), dry)
+
+    def _one() -> None:
+        d = scheduler.tick(conn, config, launch=launch, budget_policy=budget.policy)
+        if d.paused:
+            console.print(f"[yellow]paused[/yellow] ({d.reason})")
+        else:
+            console.print(
+                f"budget={d.budget_action}  dispatched={d.dispatched or '-'}  skipped={d.skipped or '-'}"
+            )
+
+    if not watch:
+        _one()
+        return
+    import time
+    try:
+        while True:
+            _one()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        console.print("\n[dim]scheduler stopped[/dim]")
+
+
+@app.command()
+def complete(
+    selector: str,
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Mark a task done and trigger the reviewer/tester handoff + next dispatch."""
+    _, conn, config = _open()
+    dry = is_dry_run(dry_run)
+    task = _find_task(conn, selector)
+    if not task:
+        raise typer.BadParameter(f"No task found for '{selector}'.")
+    result = dispatcher.complete_task(conn, config, task["id"])
+    console.print(f"[green]completed[/green] {task['id']} ({task['phase']})")
+    for kind, t in (result.get("handoff") or {}).items():
+        if t:
+            console.print(f"  [cyan]handoff[/cyan] → {kind}: {t.id}")
+    launch = dispatcher.make_scheduler_launch(Zellij(dry_run=dry), dry)
+    d = scheduler.tick(conn, config, launch=launch, budget_policy=budget.policy)
+    if d.dispatched:
+        console.print(f"  [dim]dispatched next:[/dim] {', '.join(d.dispatched)}")
+
+
+@app.command()
+def pause() -> None:
+    """Pause the scheduler (no new dispatches until resumed)."""
+    _, conn, _ = _open()
+    scheduler.pause(conn)
+    console.print("[yellow]scheduler paused[/yellow]")
+
+
+@app.command()
+def resume() -> None:
+    """Resume the scheduler."""
+    _, conn, _ = _open()
+    scheduler.resume(conn)
+    console.print("[green]scheduler resumed[/green]")
+
+
+def _find_task(conn, selector: str):
+    for t in db.list_tasks(conn):
+        if selector in (t["id"], t["name"]):
+            return t
+    return None
 
 
 # --------------------------------------------------------------------------- #

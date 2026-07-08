@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from archon.config import default_config
 from archon.models import TaskRun
-from archon.providers.registry import get_provider
+from archon.providers.registry import get_provider, known_providers
 
 
 def make_run(**overrides) -> TaskRun:
@@ -156,3 +157,51 @@ def test_custom_arg_delivery():
     launch = provider.worker_launch(run, "hello")
     assert launch.argv == ["aider", "hello"]
     assert launch.expects_prompt_paste is False
+
+
+# -- Per-phase model tiering -----------------------------------------------
+
+
+def test_claude_plan_phase_uses_strong_model():
+    provider = get_provider("claude", default_config())
+    run = make_run(phase="plan")
+    launch = provider.worker_launch(run, "plan it")
+    assert launch.argv == [
+        "claude", "-n", "claude-feature-x", "--model", "claude-opus-4-8",
+    ]
+    assert run.model == "claude-opus-4-8"
+
+
+def test_claude_execute_phase_uses_cheaper_model():
+    provider = get_provider("claude", default_config())
+    run = make_run(phase="execute")
+    launch = provider.worker_launch(run, "do it")
+    assert "--model" in launch.argv
+    assert launch.argv[launch.argv.index("--model") + 1] == "claude-sonnet-5"
+    assert run.model == "claude-sonnet-5"
+
+
+def test_codex_review_phase_uses_plan_tier_and_read_only():
+    provider = get_provider("codex", default_config())
+    run = make_run(
+        provider_id="codex", zellij_pane_name="codex-review", phase="review"
+    )
+    launch = provider.worker_launch(run, "review this", purpose="review")
+    # Plan tier: strong reasoning.
+    assert "gpt-5.5" in launch.argv
+    assert "model_reasoning_effort=high" in launch.argv
+    # Sandbox is still read-only for a review purpose.
+    assert launch.argv[launch.argv.index("--sandbox") + 1] == "read-only"
+    # Prompt remains the final argv element.
+    assert launch.argv[-1] == "review this"
+    assert run.model == "gpt-5.5"
+
+
+def test_provider_without_models_keeps_original_argv():
+    # Instances from known_providers() have .models = None.
+    provider = next(p for p in known_providers() if p.id == "claude")
+    assert provider.models is None
+    run = make_run(phase="plan")
+    launch = provider.worker_launch(run, "do the thing")
+    assert launch.argv == ["claude", "-n", "claude-feature-x"]
+    assert run.model is None

@@ -11,7 +11,7 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import db, github, prompts
+from . import db, github, handoff, prompts
 from .config import Config
 from .git_worktree import (
     WorktreeInfo,
@@ -263,3 +263,125 @@ def start_feature(
         _launch_run(conn, zellij, ctx, run, launch, dry_run=dry)
 
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Queue-driven engine: enqueue a feature chain, and launch queued tasks.
+# `launch_task` is the callback the scheduler drives.
+# --------------------------------------------------------------------------- #
+
+# phase -> (codex sandbox purpose, worktree write intent)
+_PHASE_PURPOSE = {"plan": "review", "review": "review", "execute": "feature", "test": "feature"}
+
+
+def repo_context_from_task(conn, task_row) -> RepoContext:
+    row = conn.execute("SELECT * FROM repos WHERE id=?", (task_row["repo_id"],)).fetchone()
+    if not row:
+        raise DispatchError(f"repo {task_row['repo_id']} not found for task {task_row['id']}")
+    root = Path(row["root_path"])
+    return RepoContext(root=root, name=root.name, session=row["zellij_session"], repo_id=row["id"])
+
+
+def _base_feature_name(conn, task_row) -> str:
+    """The feature name shared by every phase of a chain (drives worktree/branch)."""
+    if task_row["parent_task_id"]:
+        parent = db.get_task(conn, task_row["parent_task_id"])
+        if parent:
+            return parent["name"]
+    name = task_row["name"]
+    for suffix in (" (review)", " (test)", " (plan)"):
+        name = name.replace(suffix, "")
+    return name
+
+
+def _phase_prompt(phase, ctx, provider, wt, feature_name, task_prompt) -> str:
+    if phase == "plan":
+        return prompts.plan_prompt(
+            feature_name=feature_name, repo_name=ctx.name, provider_name=provider.display_name,
+            worktree_path=str(wt.path), branch=wt.branch, feature_description=task_prompt,
+        )
+    if phase == "review":
+        return prompts.branch_review_prompt(
+            branch=wt.branch, repo_name=ctx.name, provider_name=provider.display_name,
+            worktree_path=str(wt.path), base_branch=wt.base_branch,
+        )
+    if phase == "test":
+        return prompts.test_prompt(
+            feature_name=feature_name, repo_name=ctx.name, provider_name=provider.display_name,
+            worktree_path=str(wt.path), branch=wt.branch,
+        )
+    return prompts.feature_prompt(
+        feature_name=feature_name, repo_name=ctx.name, provider_name=provider.display_name,
+        worktree_path=str(wt.path), branch=wt.branch, feature_description=task_prompt,
+    )
+
+
+def launch_task(conn, config: Config, task_row, *, zellij: Zellij | None = None,
+                dry_run: bool | None = None) -> TaskRun:
+    """Create and launch one run for a queued task (the scheduler's launch fn).
+
+    All phases of a feature share one worktree/branch, so plan informs execute and
+    review/test see the implemented change. The provider is model-tiered by phase.
+    """
+    dry = is_dry_run(dry_run)
+    zellij = zellij or Zellij(dry_run=dry)
+    ctx = repo_context_from_task(conn, task_row)
+    provider_id = task_row["provider_id"] or (config.enabled_provider_ids() or ["claude"])[0]
+    provider = get_provider(provider_id, config)
+    phase = task_row["phase"] or "execute"
+    feature_name = _base_feature_name(conn, task_row)
+    base = default_base_branch(ctx.root)
+    wt = create_feature_worktree(ctx.root, feature_name, None, base, None, variants=False, dry_run=dry)
+
+    run = TaskRun(
+        id=run_id_for(task_row["id"], provider_id),
+        task_id=task_row["id"],
+        provider_id=provider_id,
+        status="starting",
+        phase=phase,
+        branch=wt.branch,
+        base_branch=wt.base_branch,
+        worktree_path=str(wt.path),
+        zellij_session=ctx.session,
+        zellij_pane_name=f"{provider_id}-{phase}-{sanitize_slug(feature_name)}",
+    )
+    db.insert_task_run(conn, run)
+
+    prompt = _phase_prompt(phase, ctx, provider, wt, feature_name, task_row["prompt"])
+    launch = provider.worker_launch(run, prompt, purpose=_PHASE_PURPOSE.get(phase, "feature"))
+    if run.model:
+        db.update_task_run(conn, run.id, model=run.model)
+    _launch_run(conn, zellij, ctx, run, launch, dry_run=dry)
+    return run
+
+
+def make_scheduler_launch(zellij: Zellij | None = None, dry_run: bool | None = None):
+    """Return a ``launch(conn, config, task_row)`` closure for ``scheduler.tick``."""
+    def _launch(conn, config, task_row) -> None:
+        launch_task(conn, config, task_row, zellij=zellij, dry_run=dry_run)
+    return _launch
+
+
+def enqueue_feature(conn, config: Config, ctx: RepoContext, *, feature_name: str,
+                    provider_id: str, prompt_text: str | None = None) -> dict:
+    """Queue a feature as a plan -> execute chain (handoff adds review -> test)."""
+    return handoff.enqueue_feature_chain(
+        conn, config, repo_id=ctx.repo_id or 0, feature_name=feature_name,
+        prompt=prompt_text or f"Implement {feature_name}", provider_id=provider_id,
+    )
+
+
+def complete_task(conn, config: Config, task_id: str) -> dict:
+    """Mark a task (and its live runs) done; trigger the reviewer/tester handoff."""
+    task = db.get_task(conn, task_id)
+    if not task:
+        raise DispatchError(f"task {task_id} not found")
+    for r in db.list_task_runs(conn):
+        if r["task_id"] == task_id and r["status"] in ("running", "starting", "blocked", "stale"):
+            db.set_task_run_status(conn, r["id"], "done")
+    db.set_task_status(conn, task_id, "done")
+
+    created: dict = {}
+    if task["type"] == "feature" and task["phase"] == "execute":
+        created = handoff.on_feature_done(conn, config, task)
+    return {"task": task_id, "handoff": created}

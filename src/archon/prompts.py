@@ -68,6 +68,53 @@ At the end, summarize:
 5. exact commands the human should run next
 """
 
+PLAN_TEMPLATE = """\
+Plan the implementation of feature `{feature_name}` in {repo_name}.
+
+Provider: {provider_name}
+Worktree: {worktree_path}
+Branch: {branch}
+
+You are the PLANNING agent. Do NOT write implementation code yet.
+
+Rules:
+- Inspect the project structure and find the correct frontend/backend locations.
+- Identify the files that will change and the approach for each.
+- Note nearby code patterns and the smallest useful validation commands.
+- Do not create a PR or push anything.
+
+Feature request:
+{feature_description}
+
+Produce a concise, ordered implementation plan:
+1. affected files and why
+2. step-by-step changes
+3. tests to add or update
+4. risks / open questions
+5. validation commands to run after implementation
+"""
+
+TEST_TEMPLATE = """\
+Test the implementation of `{feature_name}` in {repo_name}.
+
+Provider: {provider_name}
+Worktree: {worktree_path}
+Branch: {branch}
+
+You are the TESTING agent for a change another agent just implemented.
+
+Rules:
+- Do not change behavior; only add/adjust tests and run them.
+- Prefer the smallest useful validation commands for this repo.
+- Do not create a PR, push, or submit anything.
+
+Produce:
+1. tests run and their results
+2. failures or regressions found
+3. missing coverage worth adding
+4. final verdict: pass / needs-work
+"""
+
 COMPARISON_TEMPLATE = """\
 Compare the outputs from these provider runs:
 
@@ -117,6 +164,53 @@ def feature_prompt(
         worktree_path=worktree_path,
         branch=branch,
         feature_description=feature_description or feature_name,
+    )
+
+
+BRANCH_REVIEW_TEMPLATE = """\
+Review the implementation on branch `{branch}` in {repo_name}.
+
+Provider: {provider_name}
+Worktree: {worktree_path}
+Branch: {branch}
+
+Rules:
+- Do not modify files. Review only.
+- Diff this branch against {base_branch} and inspect the changed files.
+- Run focused tests only when helpful.
+- Do not push, open, or submit anything.
+
+Look for: correctness bugs, security/auth mistakes, broken types, missing tests,
+regressions, and maintainability issues.
+
+Produce:
+1. executive summary
+2. must-fix issues
+3. nice-to-fix issues
+4. final recommendation: approve / needs-changes
+"""
+
+
+def plan_prompt(*, feature_name, repo_name, provider_name, worktree_path, branch,
+                feature_description=None) -> str:
+    return PLAN_TEMPLATE.format(
+        feature_name=feature_name, repo_name=repo_name, provider_name=provider_name,
+        worktree_path=worktree_path, branch=branch,
+        feature_description=feature_description or feature_name,
+    )
+
+
+def test_prompt(*, feature_name, repo_name, provider_name, worktree_path, branch) -> str:
+    return TEST_TEMPLATE.format(
+        feature_name=feature_name, repo_name=repo_name, provider_name=provider_name,
+        worktree_path=worktree_path, branch=branch,
+    )
+
+
+def branch_review_prompt(*, branch, repo_name, provider_name, worktree_path, base_branch) -> str:
+    return BRANCH_REVIEW_TEMPLATE.format(
+        branch=branch, repo_name=repo_name, provider_name=provider_name,
+        worktree_path=worktree_path, base_branch=base_branch,
     )
 
 

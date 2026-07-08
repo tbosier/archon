@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from .models import Provider, Repo, Task, TaskRun
+from .models import Provider, Repo, Task, TaskRun, Worker
 from .paths import Paths, resolve_paths
 from .util import utc_now
 
@@ -63,10 +63,42 @@ CREATE TABLE IF NOT EXISTS tasks (
   pr_number INTEGER,
   prompt TEXT NOT NULL,
   provider_policy TEXT NOT NULL,
+  phase TEXT NOT NULL DEFAULT 'execute',
+  parent_task_id TEXT,
+  provider_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   finished_at TEXT,
   FOREIGN KEY(repo_id) REFERENCES repos(id)
+);
+
+CREATE TABLE IF NOT EXISTS task_dependencies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL,
+  depends_on_task_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(task_id, depends_on_task_id),
+  FOREIGN KEY(task_id) REFERENCES tasks(id),
+  FOREIGN KEY(depends_on_task_id) REFERENCES tasks(id)
+);
+
+CREATE TABLE IF NOT EXISTS workers (
+  id TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL,
+  zellij_session TEXT,
+  zellij_pane_id TEXT,
+  state TEXT NOT NULL DEFAULT 'idle',
+  current_task_run_id TEXT,
+  max_concurrency INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(provider_id) REFERENCES providers(id)
+);
+
+CREATE TABLE IF NOT EXISTS scheduler_state (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS task_runs (
@@ -74,6 +106,8 @@ CREATE TABLE IF NOT EXISTS task_runs (
   task_id TEXT NOT NULL,
   provider_id TEXT NOT NULL,
   status TEXT NOT NULL,
+  phase TEXT NOT NULL DEFAULT 'execute',
+  model TEXT,
   branch TEXT,
   base_branch TEXT,
   worktree_path TEXT,
@@ -179,9 +213,27 @@ def connect_memory() -> sqlite3.Connection:
     return conn
 
 
+# Columns added after 0.1.0; applied to pre-existing databases on connect.
+_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "tasks": [("phase", "TEXT NOT NULL DEFAULT 'execute'"), ("parent_task_id", "TEXT"),
+              ("provider_id", "TEXT")],
+    "task_runs": [("phase", "TEXT NOT NULL DEFAULT 'execute'"), ("model", "TEXT")],
+}
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a database was first created."""
+    for table, columns in _MIGRATIONS.items():
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 # --- Repos ------------------------------------------------------------------
@@ -258,16 +310,24 @@ def insert_task(conn: sqlite3.Connection, task: Task) -> None:
         """
         INSERT INTO tasks
           (id, repo_id, type, name, status, priority, pr_number, prompt,
-           provider_policy, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           provider_policy, phase, parent_task_id, provider_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             task.id, task.repo_id, task.type, task.name, task.status,
             task.priority, task.pr_number, task.prompt, task.provider_policy,
-            now, now,
+            task.phase, task.parent_task_id, task.provider_id, now, now,
         ),
     )
     conn.commit()
+
+
+def get_task(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+
+
+def list_tasks(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM tasks ORDER BY created_at").fetchall()
 
 
 def set_task_status(conn: sqlite3.Connection, task_id: str, status: str) -> None:
@@ -281,7 +341,7 @@ def set_task_status(conn: sqlite3.Connection, task_id: str, status: str) -> None
 # --- Task runs --------------------------------------------------------------
 
 _RUN_COLUMNS = [
-    "id", "task_id", "provider_id", "status", "branch", "base_branch",
+    "id", "task_id", "provider_id", "status", "phase", "model", "branch", "base_branch",
     "worktree_path", "zellij_session", "zellij_pane_id", "zellij_pane_name",
     "provider_session_name", "provider_session_id", "provider_run_id",
     "transcript_path", "stdout_log_path", "stderr_log_path", "cost_usd",
@@ -357,3 +417,133 @@ def insert_event(
          raw_json, utc_now()),
     )
     conn.commit()
+
+
+# --- Task dependency graph (DAG) --------------------------------------------
+
+def add_dependency(conn: sqlite3.Connection, task_id: str, depends_on_task_id: str) -> None:
+    """Record that ``task_id`` must wait for ``depends_on_task_id`` to finish."""
+    conn.execute(
+        "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_task_id, created_at) "
+        "VALUES (?, ?, ?)",
+        (task_id, depends_on_task_id, utc_now()),
+    )
+    conn.commit()
+
+
+def dependencies_of(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT depends_on_task_id FROM task_dependencies WHERE task_id=?", (task_id,)
+    ).fetchall()
+    return [r["depends_on_task_id"] for r in rows]
+
+
+def dependents_of(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT task_id FROM task_dependencies WHERE depends_on_task_id=?", (task_id,)
+    ).fetchall()
+    return [r["task_id"] for r in rows]
+
+
+def all_dependencies(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT task_id, depends_on_task_id FROM task_dependencies").fetchall()
+
+
+def ready_task_ids(conn: sqlite3.Connection) -> list[str]:
+    """Queued tasks whose every dependency task is ``done`` (or has no deps).
+
+    Returned highest-priority first, then oldest first — the scheduler's order.
+    """
+    rows = conn.execute(
+        """
+        SELECT t.id
+        FROM tasks t
+        WHERE t.status = 'queued'
+          AND NOT EXISTS (
+            SELECT 1 FROM task_dependencies d
+            JOIN tasks dep ON dep.id = d.depends_on_task_id
+            WHERE d.task_id = t.id AND dep.status != 'done'
+          )
+        ORDER BY t.priority DESC, t.created_at ASC
+        """
+    ).fetchall()
+    return [r["id"] for r in rows]
+
+
+# --- Worker pool ------------------------------------------------------------
+
+def upsert_worker(conn: sqlite3.Connection, w: "Worker") -> None:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO workers
+          (id, provider_id, zellij_session, zellij_pane_id, state,
+           current_task_run_id, max_concurrency, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          provider_id=excluded.provider_id,
+          zellij_session=excluded.zellij_session,
+          zellij_pane_id=excluded.zellij_pane_id,
+          state=excluded.state,
+          current_task_run_id=excluded.current_task_run_id,
+          max_concurrency=excluded.max_concurrency,
+          updated_at=excluded.updated_at
+        """,
+        (w.id, w.provider_id, w.zellij_session, w.zellij_pane_id, w.state,
+         w.current_task_run_id, w.max_concurrency, now, now),
+    )
+    conn.commit()
+
+
+def list_workers(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM workers ORDER BY provider_id, id").fetchall()
+
+
+def set_worker_state(conn: sqlite3.Connection, worker_id: str, state: str,
+                     current_task_run_id: str | None = None) -> None:
+    conn.execute(
+        "UPDATE workers SET state=?, current_task_run_id=?, updated_at=? WHERE id=?",
+        (state, current_task_run_id, utc_now(), worker_id),
+    )
+    conn.commit()
+
+
+def count_running_runs(conn: sqlite3.Connection, provider_id: str | None = None) -> int:
+    if provider_id:
+        row = conn.execute(
+            "SELECT COUNT(*) c FROM task_runs WHERE status IN ('running','starting') "
+            "AND provider_id=?", (provider_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) c FROM task_runs WHERE status IN ('running','starting')"
+        ).fetchone()
+    return int(row["c"])
+
+
+def total_cost_usd(conn: sqlite3.Connection) -> float:
+    row = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) s FROM task_runs").fetchone()
+    return float(row["s"] or 0.0)
+
+
+def max_rate_limit_pct(conn: sqlite3.Connection, column: str = "rate_limit_five_hour_pct") -> float:
+    if column not in ("rate_limit_five_hour_pct", "rate_limit_seven_day_pct"):
+        raise ValueError(f"unknown rate-limit column: {column}")
+    row = conn.execute(f"SELECT MAX({column}) m FROM task_runs").fetchone()
+    return float(row["m"] or 0.0)
+
+
+# --- Scheduler key/value state ---------------------------------------------
+
+def set_scheduler_state(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO scheduler_state (key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (key, value, utc_now()),
+    )
+    conn.commit()
+
+
+def get_scheduler_state(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
+    row = conn.execute("SELECT value FROM scheduler_state WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default

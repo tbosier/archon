@@ -12,6 +12,7 @@ import json
 import shutil
 from pathlib import Path
 
+from ..config import ModelTier, ProviderModels
 from ..models import AuthStatus, TaskRun
 from .base import LaunchPurpose, ProviderEvent, ProviderLaunch, archon_env
 
@@ -30,6 +31,9 @@ class CodexProvider:
     default_mode = "exec"
 
     login_command = ["codex", "login"]
+
+    # Set by the registry when a config is available; None means no tiering.
+    models: ProviderModels | None = None
 
     # -- detection ----------------------------------------------------------
 
@@ -58,9 +62,16 @@ class CodexProvider:
     def worker_launch(
         self, task_run: TaskRun, prompt: str, *, purpose: LaunchPurpose = "worker"
     ) -> ProviderLaunch:
+        from .. import phases
+
         sandbox = _READ_ONLY if purpose == "review" else _WORKSPACE_WRITE
+        phase = getattr(task_run, "phase", None) or "execute"
+        tier = self.models.for_phase(phase) if self.models else ModelTier()
+        extra = phases.model_args(self.id, tier)
+        if tier.model is not None:
+            task_run.model = tier.model
         return ProviderLaunch(
-            argv=[self.command, "exec", "--json", "--sandbox", sandbox, prompt],
+            argv=[self.command, "exec", "--json", "--sandbox", sandbox, *extra, prompt],
             cwd=task_run.worktree or Path.cwd(),
             env=archon_env(task_run),
             mode="exec",

@@ -16,6 +16,10 @@ ProviderMode = Literal["interactive", "exec", "prompt"]
 AuthStatus = Literal["ready", "needs_login", "unknown", "missing", "error"]
 TaskType = Literal["pr_review", "feature", "test", "security", "custom"]
 ProviderPolicy = Literal["single", "multi_review", "variants", "ask"]
+# A task's phase selects the provider model tier (plan/review = strong,
+# execute/test = cheaper) and drives the plan→execute→review→test chain.
+Phase = Literal["plan", "execute", "review", "test"]
+WorkerState = Literal["idle", "busy", "offline"]
 
 TaskStatus = Literal[
     "queued", "starting", "running", "blocked", "stale",
@@ -95,6 +99,28 @@ class Task:
     provider_policy: str = "single"
     priority: int = 0
     pr_number: int | None = None
+    phase: str = "execute"            # plan | execute | review | test
+    parent_task_id: str | None = None  # groups a feature's plan/execute/review/test
+    provider_id: str | None = None     # assigned provider for scheduler auto-dispatch
+
+
+@dataclass
+class Worker:
+    """A provider slot in the idle-worker pool."""
+
+    id: str
+    provider_id: str
+    zellij_session: str | None = None
+    zellij_pane_id: str | None = None
+    state: str = "idle"               # idle | busy | offline
+    current_task_run_id: str | None = None
+    max_concurrency: int = 1
+
+
+@dataclass
+class TaskDependency:
+    task_id: str
+    depends_on_task_id: str
 
 
 @dataclass
@@ -105,6 +131,8 @@ class TaskRun:
     task_id: str
     provider_id: str
     status: str = "queued"
+    phase: str = "execute"
+    model: str | None = None
     branch: str | None = None
     base_branch: str | None = None
     worktree_path: str | None = None

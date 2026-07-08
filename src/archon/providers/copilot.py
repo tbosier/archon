@@ -11,6 +11,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from ..config import ModelTier, ProviderModels
 from ..models import AuthStatus, TaskRun
 from .base import LaunchPurpose, ProviderEvent, ProviderLaunch, archon_env
 
@@ -25,6 +26,9 @@ class CopilotProvider:
     # If `copilot login` is unavailable in the user's version, they can launch
     # `copilot` and use the interactive /login flow.
     alt_login_command = ["copilot"]
+
+    # Set by the registry when a config is available; None means no tiering.
+    models: ProviderModels | None = None
 
     # -- detection ----------------------------------------------------------
 
@@ -52,13 +56,20 @@ class CopilotProvider:
     def worker_launch(
         self, task_run: TaskRun, prompt: str, *, purpose: LaunchPurpose = "worker"
     ) -> ProviderLaunch:
+        from .. import phases
+
         cwd = task_run.worktree or Path.cwd()
         env = archon_env(task_run)
         pane = task_run.zellij_pane_name
+        phase = getattr(task_run, "phase", None) or "execute"
+        tier = self.models.for_phase(phase) if self.models else ModelTier()
+        extra = phases.model_args(self.id, tier)
+        if tier.model is not None:
+            task_run.model = tier.model
         if prompt:
             # Programmatic one-shot prompt; prompt is passed as an argv element.
             return ProviderLaunch(
-                argv=[self.command, "-p", prompt],
+                argv=[self.command, "-p", prompt, *extra],
                 cwd=cwd,
                 env=env,
                 mode="prompt",
@@ -69,7 +80,7 @@ class CopilotProvider:
             )
         # Interactive pane; nothing to paste since there is no prompt.
         return ProviderLaunch(
-            argv=[self.command],
+            argv=[self.command, *extra],
             cwd=cwd,
             env=env,
             mode="interactive",

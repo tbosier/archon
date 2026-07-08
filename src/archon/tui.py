@@ -58,22 +58,36 @@ def _fmt_cost_tokens(row: sqlite3.Row) -> str:
 
 def task_runs_table(conn: sqlite3.Connection) -> Table:
     table = Table(title="TASK RUNS", title_style="bold cyan", expand=True, header_style="bold")
-    for col in ("Task", "Provider", "State", "Branch", "Pane", "Cost/Tokens", "Ctx%", "Heartbeat"):
+    for col in ("Task", "Provider", "Phase", "Model", "State", "Branch", "Cost/Tokens", "Ctx%"):
         table.add_column(col, overflow="fold")
     rows = sorted(db.list_task_runs(conn), key=lambda r: run_urgency(r["status"]))
     for r in rows:
         table.add_row(
             r["task_name"],
             r["provider_id"],
+            r["phase"] or "-",
+            r["model"] or "-",
             _status_text(r["status"]),
             r["branch"] or "-",
-            r["zellij_pane_id"] or r["zellij_pane_name"] or "-",
             _fmt_cost_tokens(r),
             f"{r['context_used_pct']:.0f}%" if r["context_used_pct"] is not None else "-",
-            r["last_heartbeat_at"] or "-",
         )
     if not table.rows:
         table.add_row("(no task runs yet)", "", "", "", "", "", "", "")
+    return table
+
+
+def workers_table(conn: sqlite3.Connection) -> Table:
+    table = Table(title="WORKER POOL", title_style="bold cyan", expand=True, header_style="bold")
+    for col in ("Worker", "Provider", "State", "Current run"):
+        table.add_column(col)
+    for w in db.list_workers(conn):
+        table.add_row(
+            w["id"], w["provider_id"], _status_text(w["state"]),
+            w["current_task_run_id"] or "-",
+        )
+    if not table.rows:
+        table.add_row("(no workers)", "", "", "")
     return table
 
 
@@ -84,6 +98,8 @@ def render(conn: sqlite3.Connection) -> Group:
             border_style="cyan",
         ),
         providers_table(conn),
+        Text(""),
+        workers_table(conn),
         Text(""),
         task_runs_table(conn),
         Text("Keys: p providers · l login · r refresh · n new task · q quit", style="dim"),

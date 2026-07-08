@@ -43,7 +43,12 @@ def get_provider(provider_id: str, config: "Config | None" = None) -> AgentProvi
     builds a :class:`CustomProvider` from that config entry.
     """
     if provider_id in _BUILTINS:
-        return _BUILTINS[provider_id]()
+        adapter = _BUILTINS[provider_id]()
+        if config is not None:
+            provider_config = config.providers.get(provider_id)
+            if provider_config is not None:
+                adapter.models = provider_config.models
+        return adapter
 
     if config is not None:
         wanted = provider_id[len("custom:"):] if provider_id.startswith("custom:") else provider_id

@@ -11,6 +11,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from ..config import ModelTier, ProviderModels
 from ..models import AuthStatus, TaskRun
 from ..util import sanitize_slug
 from .base import LaunchPurpose, ProviderEvent, ProviderLaunch, archon_env
@@ -23,6 +24,9 @@ class ClaudeProvider:
     default_mode = "interactive"
 
     login_command = ["claude"]
+
+    # Set by the registry when a config is available; None means no tiering.
+    models: ProviderModels | None = None
 
     # -- detection ----------------------------------------------------------
 
@@ -52,9 +56,16 @@ class ClaudeProvider:
     def worker_launch(
         self, task_run: TaskRun, prompt: str, *, purpose: LaunchPurpose = "worker"
     ) -> ProviderLaunch:
+        from .. import phases
+
         pane = task_run.zellij_pane_name or f"{self.id}-{sanitize_slug(task_run.id)}"
+        phase = getattr(task_run, "phase", None) or "execute"
+        tier = self.models.for_phase(phase) if self.models else ModelTier()
+        extra = phases.model_args(self.id, tier)
+        if tier.model is not None:
+            task_run.model = tier.model
         return ProviderLaunch(
-            argv=[self.command, "-n", pane],
+            argv=[self.command, "-n", pane, *extra],
             cwd=task_run.worktree or Path.cwd(),
             env=archon_env(task_run),
             mode="interactive",
