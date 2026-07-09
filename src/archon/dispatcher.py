@@ -7,9 +7,17 @@ one provider = one worktree = one branch/pane" invariant.
 
 from __future__ import annotations
 
+import os
 import shlex
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# Interactive CLIs (Claude/Copilot) need their TUI to finish booting before we
+# paste, and a beat between the paste and Enter or the submit is swallowed while
+# the paste is still rendering. Tunable via env for slow machines.
+PANE_BOOT_DELAY = float(os.environ.get("ARCHON_PANE_BOOT_DELAY", "3.5"))
+PANE_ENTER_DELAY = float(os.environ.get("ARCHON_PANE_ENTER_DELAY", "0.8"))
 
 from . import db, github, handoff, prompts
 from .config import Config
@@ -117,7 +125,13 @@ def _launch_run(
         db.update_task_run(conn, run.id, zellij_pane_id=pane_id)
 
     if launch.expects_prompt_paste and launch.prompt and pane_id:
+        # Give the provider's TUI time to boot before pasting, then a beat before
+        # Enter so the submit isn't swallowed while the paste is still rendering.
+        if not dry_run:
+            time.sleep(PANE_BOOT_DELAY)
         zellij.paste(ctx.session, pane_id, launch.prompt)
+        if not dry_run:
+            time.sleep(PANE_ENTER_DELAY)
         zellij.send_enter(ctx.session, pane_id)
 
     db.set_task_run_status(conn, run.id, "running")

@@ -118,7 +118,7 @@ def render(conn: sqlite3.Connection) -> Group:
         Text(""),
         task_runs_table(conn),
         health_legend(),
-        Text("Keys: p providers · l login · r refresh · n new task · q quit", style="dim"),
+        Text("live · auto-refreshes every 2s · Ctrl-C to exit", style="dim"),
     )
 
 
