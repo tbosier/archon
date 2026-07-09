@@ -102,6 +102,9 @@ def _launch_run(
     dry_run: bool,
 ) -> None:
     """Open the pane, record the pane id, inject the prompt, mark running."""
+    # Ensure the cockpit session exists so dispatching works without a prior
+    # `archon up` (idempotent no-op if it already exists).
+    zellij.attach_or_create_background(ctx.session)
     pane_command = build_pane_command(launch)
     pane_id = zellij.new_pane(
         session=ctx.session,

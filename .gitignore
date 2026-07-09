@@ -22,3 +22,5 @@ hooks.log
 .DS_Store
 .idea/
 .vscode/
+
+*.jpg

@@ -51,10 +51,16 @@ err = Console(stderr=True)
 # Shared helpers
 # --------------------------------------------------------------------------- #
 
-def _open():
+def _open(dry: bool = False):
+    """Open config + database.
+
+    In dry-run we use a throwaway in-memory database so a preview never writes
+    tasks/runs into the real store (which would otherwise skew concurrency and
+    leave phantom "running" rows behind).
+    """
     paths = resolve_paths().ensure()
-    conn = db.connect(paths)
     config = load_config(paths)
+    conn = db.connect_memory() if dry else db.connect(paths)
     return paths, conn, config
 
 
@@ -178,8 +184,8 @@ def up(
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """Start (or attach to) the cockpit for a repository."""
-    paths, conn, config = _open()
     dry = is_dry_run(dry_run)
+    paths, conn, config = _open(dry)
     ctx = dispatcher.resolve_repo_context(repo, session=session, config=config)
     dispatcher.register_repo(conn, ctx)
 
@@ -318,8 +324,8 @@ def providers_login(
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """Open a Zellij pane running the provider's native login command."""
-    _, conn, config = _open()
     dry = is_dry_run(dry_run)
+    _, conn, config = _open(dry)
     launch = login_launch_for(provider_id, config, repo=repo or Path.cwd())
     ctx = dispatcher.resolve_repo_context(repo, config=config)
     zellij = Zellij(dry_run=dry)
@@ -343,8 +349,8 @@ def review_pr(
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """Dispatch a PR review, one isolated read-only worktree per provider."""
-    paths, conn, config = _open()
     dry = is_dry_run(dry_run)
+    paths, conn, config = _open(dry)
     ctx = dispatcher.register_repo(conn, dispatcher.resolve_repo_context(repo, config=config))
     provider_ids = _resolve_providers(
         config, provider or [], all_providers=all_providers, ask=True,
@@ -378,8 +384,8 @@ def feature(
     A single provider gets the model-tiered chain; `--variants` runs multiple
     providers as immediate parallel variant branches instead.
     """
-    paths, conn, config = _open()
     dry = is_dry_run(dry_run)
+    paths, conn, config = _open(dry)
     ctx = dispatcher.register_repo(conn, dispatcher.resolve_repo_context(repo, config=config))
     provider_ids = _resolve_providers(
         config, provider or [], all_providers=False, ask=True,
@@ -570,8 +576,8 @@ def schedule(
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """Dispatch ready tasks, gated by concurrency and the budget policy."""
-    _, conn, config = _open()
     dry = is_dry_run(dry_run)
+    _, conn, config = _open(dry)
     launch = dispatcher.make_scheduler_launch(Zellij(dry_run=dry), dry)
 
     def _one() -> None:
@@ -601,8 +607,8 @@ def complete(
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """Mark a task done and trigger the reviewer/tester handoff + next dispatch."""
-    _, conn, config = _open()
     dry = is_dry_run(dry_run)
+    _, conn, config = _open(dry)
     task = _find_task(conn, selector)
     if not task:
         raise typer.BadParameter(f"No task found for '{selector}'.")
