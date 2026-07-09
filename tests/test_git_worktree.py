@@ -172,10 +172,9 @@ def test_get_git_state_untracked_is_dirty(tmp_path):
 
 
 def test_default_base_branch_fallback(tmp_path):
-    # A repo with no remote should still return a sensible fallback.
-    repo = _init_repo(tmp_path / "myrepo")
-    base = default_base_branch(repo)
-    assert base in ("origin/main", "origin/master")
+    # A local repo with no remote should branch from its local default branch.
+    repo = _init_repo(tmp_path / "myrepo")   # created with `-b main` + a commit
+    assert default_base_branch(repo) == "main"
 
 
 # --- real feature worktree creation end-to-end ---------------------------

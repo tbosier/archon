@@ -52,19 +52,27 @@ every run's state, cost, model, and telemetry in one dashboard.
 It is **provider-agnostic from day one** — Claude, Codex, and Copilot are just
 adapters, and custom CLIs plug in via config.
 
+One shared cockpit spans **every repo** — watch all your agents on one screen,
+no tab-switching:
+
 ```
-┌─ ARCHON ─ parallel AI coding cockpit ───────────────────────────────────────┐
+┌─ ARCHON ─ command center (session: archon) ─────────────────────────────────┐
 │ WORKER POOL                                                                  │
-│  claude-w1   claude    idle                                                  │
-│  codex-w1    codex     busy   RUN-...-codex                                  │
+│  claude-w1   claude    busy                                                  │
+│  codex-w1    codex     busy                                                  │
 │                                                                              │
 │ TASK RUNS                        (sorted by urgency — blocked first)         │
-│  Task            Provider Phase    Model             State     Branch        │
-│  newButton4User  claude   plan     claude-opus-4-8   done      feature/nb4u  │
-│  newButton4User  claude   execute  claude-sonnet-5   running   feature/nb4u  │
-│  PR #552 review  codex    review   gpt-5.5           running   review/pr-552 │
+│  Repo       Task            Provider Phase    Model             State        │
+│  alpha      health-endpoint claude   execute  claude-sonnet-5   running      │
+│  beta       dark-mode       codex    review   gpt-5.5           running      │
+│  gamma      rate-limiter    claude   plan     claude-opus-4-8   queued       │
+│  ci_amplify PR #552 review  codex    review   gpt-5.5           running      │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+Three different repositories (`alpha`, `beta`, `gamma`) plus a PR review, four
+agents, **one dashboard**. Each run stays isolated in its own worktree/branch;
+only the view is unified.
 
 ### Design principles
 
@@ -126,8 +134,9 @@ TASK-20260708-001  [done]        plan     · claude-opus-4-8
 
 ## Three agents, three tasks, one screen
 
-Enable multiple providers and Archon fans work out across the Zellij cockpit —
-each provider in its own pane, its own worktree, its own branch. Nothing collides.
+Archon runs a single shared **command-center session** that spans repositories, so
+agents working on entirely separate projects appear side by side — each provider
+in its own pane, its own worktree, its own branch. Nothing collides.
 
 ```
 ╔═══════════════════════ ci-amplify-ai-archon (Zellij) ═══════════════════════╗
@@ -258,6 +267,27 @@ archon feature newButton4User --provider claude --provider codex --variants
 #     each in its own worktree — never the same branch
 ```
 
+### 4. Many repos at once, one command center
+
+`archon up` in any number of repos joins the **same** shared session, so agents
+across projects show up on one screen.
+
+```bash
+archon up --repo ~/alpha    # each attaches to session `archon`
+archon up --repo ~/beta
+archon up --repo ~/gamma
+
+archon feature "health endpoint" --repo ~/alpha --provider claude
+archon feature "dark mode"       --repo ~/beta  --provider codex
+archon feature "rate limiter"    --repo ~/gamma --provider claude
+
+archon dashboard            # one screen: Repo · Task · Provider · Phase · Model · State
+zellij attach archon        # or attach the cockpit and watch the live panes
+```
+
+Prefer isolated per-repo cockpits instead? Set `command_center.shared: false` in
+`config.yaml` (or pass `archon up --session <name>`).
+
 ---
 
 ## Model tiering
@@ -329,7 +359,8 @@ run used.
 | `archon schedule [--watch]` | Dispatch ready tasks, gated by concurrency + budget. |
 | `archon complete <selector>` | Mark a task done; trigger the reviewer/tester handoff and next dispatch. |
 | `archon budget` / `pause` / `resume` | Inspect and control the scheduler. |
-| `archon status [--watch]` | Provider readiness, worker pool, and task-run dashboard. |
+| `archon dashboard` | The command center: live view of every agent across all repos, one screen. |
+| `archon status [--watch]` | Provider readiness, worker pool, and task-run dashboard (all repos). |
 | `archon focus <selector>` / `stop <selector>` | Focus or gracefully stop a run's pane. |
 | `archon search <query>` / `touched <path>` | Full-text search transcripts/logs; show which runs touched a file. |
 | `archon statusline` / `hook <name>` | Provider integration endpoints (called by statuslines/hooks). |
@@ -378,8 +409,16 @@ Config is a single YAML file.
 
 ```
 ~/.config/archon/config.yaml            # provider choices, model tiers, scheduler + budget
-~/.local/share/archon/archon.db         # tasks, runs, dependency graph, workers, telemetry
+~/.local/share/archon/archon.db         # tasks, runs, dependency graph, workers, telemetry (all repos)
 ~/.local/share/archon/events.jsonl      # append-only event log
+```
+
+The command center is one shared session by default:
+
+```yaml
+command_center:
+  shared: true       # every repo's agents land in one session → one screen
+  session: archon    # the shared Zellij session name
 ```
 
 Override with `ARCHON_CONFIG_HOME` and `ARCHON_HOME`. See

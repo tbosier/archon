@@ -17,11 +17,16 @@ from rich.table import Table
 from rich.text import Text
 
 from . import db
-from .models import STATUS_COLORS, run_urgency
+from .models import STATUS_COLORS, health_of, run_urgency
 
 
 def _status_text(status: str) -> Text:
     return Text(status, style=STATUS_COLORS.get(status, "white"))
+
+
+def _health_text(status: str) -> Text:
+    glyph, color, _ = health_of(status)
+    return Text(glyph, style=f"bold {color}")
 
 
 def _yesno(value: bool) -> Text:
@@ -58,23 +63,33 @@ def _fmt_cost_tokens(row: sqlite3.Row) -> str:
 
 def task_runs_table(conn: sqlite3.Connection) -> Table:
     table = Table(title="TASK RUNS", title_style="bold cyan", expand=True, header_style="bold")
-    for col in ("Task", "Provider", "Phase", "Model", "State", "Branch", "Cost/Tokens", "Ctx%"):
+    for col in ("", "Repo", "Task", "Provider", "Phase", "Model", "State", "Branch"):
         table.add_column(col, overflow="fold")
     rows = sorted(db.list_task_runs(conn), key=lambda r: run_urgency(r["status"]))
     for r in rows:
         table.add_row(
+            _health_text(r["status"]),
+            r["repo_name"],
             r["task_name"],
             r["provider_id"],
             r["phase"] or "-",
             r["model"] or "-",
             _status_text(r["status"]),
             r["branch"] or "-",
-            _fmt_cost_tokens(r),
-            f"{r['context_used_pct']:.0f}%" if r["context_used_pct"] is not None else "-",
         )
     if not table.rows:
-        table.add_row("(no task runs yet)", "", "", "", "", "", "", "")
+        table.add_row("", "(no task runs yet)", "", "", "", "", "", "")
     return table
+
+
+def health_legend() -> Text:
+    return Text.assemble(
+        ("  ● ", "bold green"), ("working   ", "dim"),
+        ("● ", "bold yellow"), ("needs help   ", "dim"),
+        ("● ", "bold red"), ("problem   ", "dim"),
+        ("✓ ", "bold green"), ("done   ", "dim"),
+        ("○ ", "bold dim"), ("waiting", "dim"),
+    )
 
 
 def workers_table(conn: sqlite3.Connection) -> Table:
@@ -102,6 +117,7 @@ def render(conn: sqlite3.Connection) -> Group:
         workers_table(conn),
         Text(""),
         task_runs_table(conn),
+        health_legend(),
         Text("Keys: p providers · l login · r refresh · n new task · q quit", style="dim"),
     )
 

@@ -387,8 +387,11 @@ def find_task_run(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
 
 def list_task_runs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT tr.*, t.name AS task_name, t.type AS task_type "
-        "FROM task_runs tr JOIN tasks t ON t.id = tr.task_id "
+        "SELECT tr.*, t.name AS task_name, t.type AS task_type, "
+        "       COALESCE(r.name, '-') AS repo_name "
+        "FROM task_runs tr "
+        "JOIN tasks t ON t.id = tr.task_id "
+        "LEFT JOIN repos r ON r.id = t.repo_id "
         "ORDER BY tr.created_at DESC"
     ).fetchall()
 

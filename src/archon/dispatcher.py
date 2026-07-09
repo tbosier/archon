@@ -51,12 +51,28 @@ def session_name_for(repo_root_path: Path) -> str:
     return f"{sanitize_slug(repo_root_path.name)}-archon"
 
 
-def resolve_repo_context(repo_arg: str | Path | None, *, session: str | None = None) -> RepoContext:
+def cockpit_session(config: Config | None, repo_root_path: Path) -> str:
+    """The Zellij session a repo's agents belong to.
+
+    With a shared command center (default), every repo lands in one session so
+    you watch all agents on a single screen; otherwise each repo gets its own.
+    """
+    if config and config.command_center.shared:
+        return config.command_center.session
+    return session_name_for(repo_root_path)
+
+
+def resolve_repo_context(
+    repo_arg: str | Path | None,
+    *,
+    session: str | None = None,
+    config: Config | None = None,
+) -> RepoContext:
     root = repo_root(repo_arg or Path.cwd())
     return RepoContext(
         root=root,
         name=root.name,
-        session=session or session_name_for(root),
+        session=session or cockpit_session(config, root),
     )
 
 

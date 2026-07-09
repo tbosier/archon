@@ -66,6 +66,26 @@ def run_urgency(status: str) -> int:
     return RUN_URGENCY.get(status, 99)
 
 
+# Traffic-light health cue for the dashboard: (glyph, color, label).
+# green = working/healthy, yellow = needs a human, red = broken, dim = idle.
+_HEALTH_WORKING = {"running", "starting"}
+_HEALTH_ATTENTION = {"blocked", "needs_login", "stale", "budget_capped"}
+_HEALTH_PROBLEM = {"crashed", "failed", "error", "missing"}
+_HEALTH_DONE = {"done", "ready"}
+
+
+def health_of(status: str) -> tuple[str, str, str]:
+    if status in _HEALTH_PROBLEM:
+        return ("●", "red", "problem")
+    if status in _HEALTH_ATTENTION:
+        return ("●", "yellow", "needs help")
+    if status in _HEALTH_WORKING:
+        return ("●", "green", "working")
+    if status in _HEALTH_DONE:
+        return ("✓", "green", "done")
+    return ("○", "dim", "waiting")
+
+
 @dataclass
 class Repo:
     name: str

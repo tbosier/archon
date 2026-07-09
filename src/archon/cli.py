@@ -180,7 +180,7 @@ def up(
     """Start (or attach to) the cockpit for a repository."""
     paths, conn, config = _open()
     dry = is_dry_run(dry_run)
-    ctx = dispatcher.resolve_repo_context(repo, session=session)
+    ctx = dispatcher.resolve_repo_context(repo, session=session, config=config)
     dispatcher.register_repo(conn, ctx)
 
     needs_wizard = ask_providers or (not config.is_configured() and config.startup.show_provider_wizard != "never")
@@ -210,7 +210,13 @@ def up(
     if spawn_on_task:
         launch_now = False
 
-    console.print(f"[cyan]archon up[/cyan]  repo={ctx.root}  session={ctx.session}  dry_run={dry}")
+    scope = "command center (shared)" if config.command_center.shared else "per-repo"
+    console.print(f"[cyan]archon up[/cyan]  repo={ctx.root}  session={ctx.session} [dim]({scope})[/dim]  dry_run={dry}")
+    # Open a persistent dashboard pane in the shared session so every repo's
+    # agents are visible on one screen.
+    if config.command_center.shared and not _dashboard_pane_exists(zellij, ctx.session):
+        zellij.new_pane(ctx.session, "archon-dashboard", str(ctx.root),
+                        ["bash", "-lc", "archon dashboard"])
     health_all = check_all(known_providers())
     for pid in config.enabled_provider_ids():
         health = health_all.get(pid)
@@ -234,6 +240,20 @@ def up(
 
     from . import tui
     tui.show_once(conn, console)
+    console.print(
+        f"\n[dim]command center → attach with[/dim] [cyan]zellij attach {ctx.session}[/cyan]"
+        f" [dim]· dashboard pane runs[/dim] [cyan]archon dashboard[/cyan]"
+    )
+
+
+def _dashboard_pane_exists(zellij: Zellij, session: str) -> bool:
+    try:
+        return any(
+            "archon-dashboard" in (p.get("name") or p.get("title") or "")
+            for p in zellij.list_panes(session)
+        )
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -301,7 +321,7 @@ def providers_login(
     _, conn, config = _open()
     dry = is_dry_run(dry_run)
     launch = login_launch_for(provider_id, config, repo=repo or Path.cwd())
-    ctx = dispatcher.resolve_repo_context(repo)
+    ctx = dispatcher.resolve_repo_context(repo, config=config)
     zellij = Zellij(dry_run=dry)
     zellij.attach_or_create_background(ctx.session)
     zellij.new_pane(ctx.session, login_pane_name(provider_id), str(ctx.root),
@@ -325,7 +345,7 @@ def review_pr(
     """Dispatch a PR review, one isolated read-only worktree per provider."""
     paths, conn, config = _open()
     dry = is_dry_run(dry_run)
-    ctx = dispatcher.register_repo(conn, dispatcher.resolve_repo_context(repo))
+    ctx = dispatcher.register_repo(conn, dispatcher.resolve_repo_context(repo, config=config))
     provider_ids = _resolve_providers(
         config, provider or [], all_providers=all_providers, ask=True,
         kind="review", variants=True,
@@ -360,7 +380,7 @@ def feature(
     """
     paths, conn, config = _open()
     dry = is_dry_run(dry_run)
-    ctx = dispatcher.register_repo(conn, dispatcher.resolve_repo_context(repo))
+    ctx = dispatcher.register_repo(conn, dispatcher.resolve_repo_context(repo, config=config))
     provider_ids = _resolve_providers(
         config, provider or [], all_providers=False, ask=True,
         kind="feature", variants=variants,
@@ -412,8 +432,17 @@ def _print_dispatch(result: dispatcher.DispatchResult, dry: bool) -> None:
 # --------------------------------------------------------------------------- #
 
 @app.command()
+def dashboard() -> None:
+    """The command center: live view of every agent across all repos, one screen."""
+    _, conn, config = _open()
+    _sync_providers_to_db(conn, config)
+    from . import tui
+    tui.watch(conn)
+
+
+@app.command()
 def status(watch: bool = typer.Option(False, "--watch")) -> None:
-    """Show provider readiness and task-run state."""
+    """Show provider readiness and task-run state (all repos)."""
     _, conn, config = _open()
     _sync_providers_to_db(conn, config)
     from . import tui

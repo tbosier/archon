@@ -93,7 +93,18 @@ def default_base_branch(repo: Path) -> str:
         if check.returncode == 0:
             return candidate
 
-    return "origin/main"
+    # Local-only repo (no remote): branch from the local default branch.
+    for candidate in ("main", "master"):
+        check = _git(repo, ["rev-parse", "--verify", "--quiet", candidate])
+        if check.returncode == 0:
+            return candidate
+
+    # Detached or unusual: use the current branch if we have one.
+    head = _git(repo, ["rev-parse", "--abbrev-ref", "HEAD"])
+    if head.returncode == 0 and head.stdout.strip() and head.stdout.strip() != "HEAD":
+        return head.stdout.strip()
+
+    return "main"
 
 
 def sanitize_branch_component(value: str) -> str:

@@ -104,6 +104,19 @@ class StartupConfig(BaseModel):
     ] = "ask_if_multiple"
 
 
+class CommandCenterConfig(BaseModel):
+    """One shared cockpit that spans repositories.
+
+    When ``shared`` is set, every repo's agents land in the same Zellij session
+    (``session``) so you watch them all on one screen. Worktrees still keep each
+    repo/run isolated — only the pane layout is unified. Set ``shared=False`` to
+    fall back to a per-repo session named ``<repo>-archon``.
+    """
+
+    shared: bool = True
+    session: str = "archon"
+
+
 class BudgetConfig(BaseModel):
     """Cost + rate-limit safety rails consumed by the scheduler."""
 
@@ -128,6 +141,7 @@ class SchedulerConfig(BaseModel):
 class Config(BaseModel):
     version: int = 1
     startup: StartupConfig = Field(default_factory=StartupConfig)
+    command_center: CommandCenterConfig = Field(default_factory=CommandCenterConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     custom: list[CustomProviderConfig] = Field(default_factory=list)
