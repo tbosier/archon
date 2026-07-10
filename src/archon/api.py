@@ -1178,8 +1178,9 @@ CONTROL_CENTER_HTML = """<!doctype html>
     function renderJobs(jobs) {
       const root = el('jobs');
       root.replaceChildren();
-      if (!jobs.length) return root.appendChild(emptyNode('No active jobs'));
-      jobs.forEach((job) => {
+      const openJobs = jobs.filter((job) => !['done', 'complete', 'failed', 'cancelled'].includes(job.status));
+      if (!openJobs.length) return root.appendChild(emptyNode('No active jobs'));
+      openJobs.forEach((job) => {
         const node = document.createElement('div');
         node.className = `item ${statusClass(job.status)}`;
         node.title = job.objective || job.title || '';

@@ -111,7 +111,9 @@ def test_close_and_dump_screen_argv():
     z = Zellij(dry_run=True)
     z.close_pane("s", "terminal_2")
     z.dump_screen("s", "terminal_2", "/tmp/screen.txt")
-    assert any("close-pane-with-id" in c for c in z.commands)
+    close = [c for c in z.commands if "close-pane" in c][0]
+    assert "--pane-id" in close
+    assert "terminal_2" in close
     dump = [c for c in z.commands if "dump-screen" in c][0]
     assert "/tmp/screen.txt" in dump
 
