@@ -103,5 +103,6 @@ def test_build_pane_command_injects_archon_env(conn, cfg, ctx):
     )
     cmd = dispatcher.build_pane_command(res.launches["claude"])
     assert cmd[:2] == ["bash", "-lc"]
+    assert "unset CODEX_CI CODEX_SANDBOX_NETWORK_DISABLED" in cmd[2]
     assert "ARCHON_TASK_ID" in cmd[2]
     assert "ARCHON_PROVIDER_ID" in cmd[2]

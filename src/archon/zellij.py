@@ -169,10 +169,12 @@ class Zellij:
             self._base(session) + ["write", "--pane-id", pane_id, "13"],
         )
 
-    def focus_pane(self, session: str, pane_id: str) -> None:
-        self._run(
-            self._base(session) + ["focus-pane-with-id", pane_id],
+    def focus_pane(self, session: str, pane_id: str) -> bool:
+        proc = self._run(
+            self._base(session) + ["focus-pane-id", pane_id],
+            capture=True,
         )
+        return proc is None or proc.returncode == 0
 
     def rename_pane(self, session: str, pane_id: str, name: str) -> None:
         self._run(

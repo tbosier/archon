@@ -37,6 +37,17 @@ def test_claude_worker_launch():
     assert launch.mode == "interactive"
     assert launch.cwd == Path("/fake/worktree")
     assert launch.prompt == "do the thing"
+    assert launch.env["HOME"] == str(Path.home())
+    assert launch.env["CLAUDE_CONFIG_DIR"] == str(Path.home() / ".claude")
+
+
+def test_claude_login_launch_uses_user_auth_env():
+    provider = get_provider("claude")
+    launch = provider.login_launch(Path("/fake/repo"))
+    assert launch.argv == ["claude"]
+    assert launch.cwd == Path("/fake/repo")
+    assert launch.env["HOME"] == str(Path.home())
+    assert launch.env["CLAUDE_CONFIG_DIR"] == str(Path.home() / ".claude")
 
 
 def test_claude_pane_fallback_when_unnamed():

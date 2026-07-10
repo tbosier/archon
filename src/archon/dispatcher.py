@@ -96,7 +96,11 @@ def build_pane_command(launch: ProviderLaunch) -> list[str]:
     the ARCHON_* environment is present inside the Zellij pane."""
     exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in launch.env.items())
     inner = " ".join(shlex.quote(a) for a in launch.argv)
-    script = f"{exports} exec {inner}" if exports else f"exec {inner}"
+    # Archon itself may be launched from another agent runtime. Do not leak that
+    # runtime's CI/sandbox flags into provider panes; native provider CLIs should
+    # see the user's normal auth/config environment instead.
+    unsets = "unset CODEX_CI CODEX_SANDBOX_NETWORK_DISABLED CODEX_THREAD_ID CODEX_MANAGED_BY_NPM CODEX_MANAGED_PACKAGE_ROOT"
+    script = f"{unsets}; {exports} exec {inner}" if exports else f"{unsets}; exec {inner}"
     return ["bash", "-lc", script]
 
 

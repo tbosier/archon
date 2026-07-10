@@ -8,6 +8,7 @@ all — it arrives out-of-band via ``archon statusline`` and ``archon hook`` —
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -42,11 +43,33 @@ class ClaudeProvider:
 
     # -- launches -----------------------------------------------------------
 
+    def _auth_env(self) -> dict[str, str]:
+        """Environment needed for Claude to find the user's local login."""
+        env = {
+            "HOME": str(Path.home()),
+            "CLAUDE_CONFIG_DIR": str(Path.home() / ".claude"),
+        }
+        for key in (
+            "USER",
+            "LOGNAME",
+            "SHELL",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "SSH_AUTH_SOCK",
+        ):
+            value = os.environ.get(key)
+            if value:
+                env[key] = value
+        return env
+
     def login_launch(self, repo: Path | None = None) -> ProviderLaunch:
         return ProviderLaunch(
             argv=list(self.login_command),
             cwd=repo or Path.cwd(),
-            env={},
+            env=self._auth_env(),
             mode="interactive",
             expects_prompt_paste=False,
             captures_jsonl=False,
@@ -64,10 +87,12 @@ class ClaudeProvider:
         extra = phases.model_args(self.id, tier)
         if tier.model is not None:
             task_run.model = tier.model
+        env = archon_env(task_run)
+        env.update(self._auth_env())
         return ProviderLaunch(
             argv=[self.command, "-n", pane, *extra],
             cwd=task_run.worktree or Path.cwd(),
-            env=archon_env(task_run),
+            env=env,
             mode="interactive",
             expects_prompt_paste=True,
             captures_jsonl=False,
