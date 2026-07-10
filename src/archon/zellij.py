@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from typing import Any
 
@@ -80,6 +81,7 @@ class Zellij:
                 check=False,
                 capture_output=capture,
                 text=True,
+                env=_zellij_env(),
             )
         except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - defensive
             logger.warning("zellij command failed (%s): %s", exc, " ".join(argv))
@@ -94,7 +96,7 @@ class Zellij:
         does not exist and is a no-op otherwise.
         """
         self._run(
-            ["zellij", "attach", "--create-background", session],
+            ["zellij", "attach", "--create-background", "--forget", session],
         )
 
     def attach(self, session: str) -> None:
@@ -204,14 +206,14 @@ class Zellij:
 
     def close_pane(self, session: str, pane_id: str) -> None:
         self._run(
-            self._base(session) + ["close-pane-with-id", pane_id],
+            self._base(session) + ["close-pane", "--pane-id", pane_id],
         )
 
     def dump_screen(self, session: str, pane_id: str, path: str) -> None:
         """Dump a pane's screen contents to ``path`` (for stale/hung debugging)."""
         self._run(
             self._base(session)
-            + ["dump-screen", "--pane-id", pane_id, path],
+            + ["dump-screen", "--pane-id", pane_id, "--path", path],
         )
 
 
@@ -248,6 +250,20 @@ def _parse_list_panes(stdout: str) -> list[dict]:
     elif isinstance(data, list):
         panes = [p for p in data if isinstance(p, dict)]
     return panes
+
+
+def _zellij_env() -> dict[str, str]:
+    """Run Zellij commands from outside any currently attached session.
+
+    Zellij 0.44 binds ``zellij action ...`` to the caller's active session when
+    these variables are present. Archon always passes an explicit session name,
+    so inheriting the surrounding pane's session would send actions to the wrong
+    cockpit.
+    """
+    env = os.environ.copy()
+    for key in ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"):
+        env.pop(key, None)
+    return env
 
 
 def _parse_ndjson(stdout: str) -> list[dict]:

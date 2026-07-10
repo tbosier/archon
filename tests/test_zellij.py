@@ -70,6 +70,22 @@ def test_dry_run_records_and_never_calls_subprocess():
     assert len(list_calls) == 1
 
 
+def test_real_run_strips_surrounding_zellij_env(monkeypatch):
+    monkeypatch.setenv("ZELLIJ", "0")
+    monkeypatch.setenv("ZELLIJ_SESSION_NAME", "wrong-session")
+    monkeypatch.setenv("ZELLIJ_PANE_ID", "99")
+    z = Zellij(dry_run=False)
+    with mock.patch("archon.zellij.subprocess.run", return_value=_completed("")) as run:
+        z.attach_or_create_background("archon")
+    kwargs = run.call_args.kwargs
+    assert "ZELLIJ" not in kwargs["env"]
+    assert "ZELLIJ_SESSION_NAME" not in kwargs["env"]
+    assert "ZELLIJ_PANE_ID" not in kwargs["env"]
+    assert run.call_args.args[0] == [
+        "zellij", "attach", "--create-background", "--forget", "archon",
+    ]
+
+
 def test_dry_run_new_pane_argv_content():
     z = Zellij(dry_run=True)
     z.new_pane("s", "codex-login", "/repo", ["bash", "-lc", "codex login"])

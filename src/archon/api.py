@@ -1145,11 +1145,11 @@ CONTROL_CENTER_HTML = """<!doctype html>
     }
 
     function cleanTitle(text, fallback = 'Untitled') {
-      let value = String(text || '').replace(/\s+/g, ' ').trim();
-      value = value.replace(/^(build|create|make|implement|add)\s+/i, '');
-      value = value.replace(/^(a|an|the)\s+/i, '');
-      value = value.replace(/\b(for something|using numpy for something|it should.*|should.*)$/i, '');
-      value = value.replace(/\b(something dumb like|for something dumb like)\b/i, '');
+      let value = String(text || '').replace(/\\s+/g, ' ').trim();
+      value = value.replace(/^(build|create|make|implement|add)\\s+/i, '');
+      value = value.replace(/^(a|an|the)\\s+/i, '');
+      value = value.replace(/\\b(for something|using numpy for something|it should.*|should.*)$/i, '');
+      value = value.replace(/\\b(something dumb like|for something dumb like)\\b/i, '');
       const words = value.trim().split(' ').filter(Boolean).slice(0, 5);
       return titleCase(words.join(' ') || fallback);
     }

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-176%20passing-3fb950?style=flat-square&logo=pytest&logoColor=white" alt="Tests: 176 passing" />
+  <img src="https://img.shields.io/badge/tests-183%20passing-3fb950?style=flat-square&logo=pytest&logoColor=white" alt="Tests: 183 passing" />
   <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/cockpit-Zellij-22d3ee?style=flat-square" alt="Zellij" />
   <img src="https://img.shields.io/badge/CLI-Typer%20%2B%20Rich-2b6cff?style=flat-square" alt="Built with Typer + Rich" />
@@ -28,6 +28,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
+  <a href="#browser-control-center">Control center</a> ·
   <a href="#example-workflows">Workflows</a> ·
   <a href="#the-pipeline">Pipeline</a> ·
   <a href="#commands">Commands</a> ·
@@ -47,7 +48,8 @@ squinting to see which agent is blocked on a permission prompt or burning budget
 **Archon turns [Zellij](https://zellij.dev) into a cockpit for that work.** You run
 one command; Archon picks the providers, creates isolated Git worktrees per task,
 launches the right CLI in the right pane, injects a high-quality prompt, and tracks
-every run's state, cost, model, and telemetry in one dashboard.
+every run's state, cost, model, and telemetry in one dashboard. You can operate it
+from the terminal dashboard or from the local browser control center.
 
 It is **provider-agnostic from day one** — Claude, Codex, and Copilot are just
 adapters, and custom CLIs plug in via config.
@@ -89,6 +91,8 @@ only the view is unified.
 ## Features
 
 - **Provider setup wizard** — detects installed CLIs, best-effort auth checks, saves your choice.
+- **Local browser control center** — submit tasks in a chat-style command box, add repos,
+  schedule work, inspect active runs, focus panes, and stop runs without memorising CLI commands.
 - **Task queue + idle worker pool** — enqueue work; the scheduler dispatches ready tasks to idle providers within concurrency limits.
 - **Dependency graph (DAG)** — every task chain is a graph; a task runs only when its dependencies are `done`.
 - **Model tiering** — a strong model plans, a cheaper model executes (per provider, configurable).
@@ -175,19 +179,84 @@ provider CLI ([`claude`](https://docs.claude.com/claude-code),
 # 1. Install
 git clone https://github.com/tbosier/archon
 cd archon
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
+uv venv
+uv pip install -e .
 
 # 2. Initialise config + database
-archon init
+.venv/bin/archon init
 
 # 3. Pick your providers (interactive wizard)
-archon setup
+.venv/bin/archon setup
+
+# 4. Start the local browser control center
+.venv/bin/archon web
+# open http://127.0.0.1:8716
 ```
 
 > Try it safely first. Everything runs without side effects under
 > `ARCHON_DRY_RUN=1` — great for seeing the worktree/branch/launch plan before
 > Archon touches your machine.
+
+If you prefer an already-activated virtualenv, `archon ...` works the same as
+`.venv/bin/archon ...`.
+
+---
+
+## Browser control center
+
+The browser control center is the easiest way to drive Archon during normal use.
+It runs as a local FastAPI app and talks to the same SQLite database, scheduler,
+Git worktree manager, provider adapters, and Zellij runtime as the CLI.
+
+```bash
+cd ~/projects/archon
+.venv/bin/archon web --host 127.0.0.1 --port 8716
+```
+
+Open `http://127.0.0.1:8716`. From there:
+
+1. Add a repository from the collapsed **Workspace** section if it is not already listed.
+2. Select the repo and provider.
+3. Type a task in **Command** and press Enter or **Send**.
+4. Archon creates a planning job, creates a feature worktree from the repo's default branch,
+   and launches the provider pane in Zellij.
+5. Use **Schedule** to dispatch queued work, **Focus** to jump to a run's pane, and **Stop** to close a run.
+
+Repositories must already be Git repos. For a brand-new project:
+
+```bash
+mkdir -p ~/projects/TestArchFE
+cd ~/projects/TestArchFE
+git init
+git commit --allow-empty -m "chore: init"
+```
+
+Then add `/home/taylo/projects/TestArchFE` in the control center.
+
+### Zellij notes
+
+Provider panes are real Zellij panes. To watch them directly:
+
+```bash
+zellij attach archon
+```
+
+`archon web` can focus/stop panes when it can talk to the same active Zellij context.
+Some Zellij versions only allow `zellij action ...` against the current attached
+session, not an arbitrary named session from another shell. If **Focus** does not
+move your visible terminal, attach manually with `zellij attach archon` and select
+the run pane there.
+
+Claude Code may show a terminal approval prompt such as:
+
+```text
+Waiting to run: ...
+<ENTER> run, <ESC> drop to shell
+```
+
+That is Claude asking permission to run a command, not Archon failing to launch
+the agent. Focus the pane and press Enter to approve it. New Claude panes inherit
+your normal `~/.claude` login context.
 
 ---
 
@@ -349,9 +418,13 @@ run used.
 
 | Command | What it does |
 |---|---|
+| `archon init` | Initialise config and the SQLite database; safe to run repeatedly. |
 | `archon up` | Start/attach the cockpit for a repo. First run shows the provider wizard; registers the worker pool. |
+| `archon web` | Start the local browser control center at `http://127.0.0.1:8716`. |
+| `archon server` | Start only the local FastAPI/SSE API; `archon web` currently delegates to this. |
 | `archon setup` | Run the provider-selection wizard and save the choice. |
 | `archon providers` | List provider state. Subcommands: `doctor`, `enable`, `disable`, `login`, `refresh`. |
+| `archon jobs` / `attention` | Inspect control-center jobs and open attention items. |
 | `archon review-pr <N>` | Review a PR — one isolated read-only worktree/pane per provider. |
 | `archon feature <name>` | Queue a feature as plan → execute (→ review → test). `--variants` for parallel variants, `--now` to skip the queue. |
 | `archon queue` | Show queued and ready tasks. |
@@ -360,6 +433,7 @@ run used.
 | `archon complete <selector>` | Mark a task done; trigger the reviewer/tester handoff and next dispatch. |
 | `archon budget` / `pause` / `resume` | Inspect and control the scheduler. |
 | `archon dashboard` | The command center: live view of every agent across all repos, one screen. |
+| `archon tui` | Launch the Rich live dashboard directly. |
 | `archon status [--watch]` | Provider readiness, worker pool, and task-run dashboard (all repos). |
 | `archon focus <selector>` / `stop <selector>` | Focus or gracefully stop a run's pane. |
 | `archon search <query>` / `touched <path>` | Full-text search transcripts/logs; show which runs touched a file. |
@@ -392,19 +466,22 @@ Claude integration is wired via [`examples/claude-settings.json`](examples/claud
 
 ```
 Archon
+  ├── local web control center  browser UI + FastAPI/SSE API
   ├── Zellij cockpit            panes, tabs, focus, colours (via `zellij action`)
   ├── Git worktree manager      one isolated worktree + branch per run
+  ├── jobs / agents / attention normalized control-center objects
   ├── task queue + scheduler    DAG-aware dispatch to an idle worker pool
   ├── budget / rate-limit gate  soft/hard cost caps + rate-limit thresholds
   ├── provider wizard           detect · auth · enable · login
   ├── provider adapters         claude · codex · copilot · custom (model-tiered)
   ├── reviewer/tester handoff   feature done → review → test
   ├── telemetry / events        statusline + hooks → normalized ProviderEvents
-  └── dashboard                 Rich TUI, urgency-sorted
+  └── dashboards                browser console + Rich TUI, urgency-sorted
 ```
 
-State lives in **SQLite** (`repos`, `providers`, `tasks`, `task_dependencies`,
-`task_runs`, `workers`, `events`, `transcript_events` + FTS5, `file_touches`).
+State lives in **SQLite** (`repos`, `providers`, `jobs`, `agents`,
+`attention_items`, `tasks`, `task_dependencies`, `task_runs`, `workers`,
+`events`, `transcript_events` + FTS5, `file_touches`).
 Config is a single YAML file.
 
 ```
@@ -445,7 +522,7 @@ submission unless the human explicitly asks.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 176 tests, fully offline (subprocess/Zellij/Git are mocked or dry-run)
+pytest            # 183 tests, fully offline (subprocess/Zellij/Git are mocked or dry-run)
 ```
 
 The suite mirrors the acceptance criteria: DB schema + migrations, config
@@ -457,6 +534,9 @@ malformed-input tolerance for statusline/hooks.
 ```
 src/archon/
   cli.py                 typer app — every command
+  api.py                 FastAPI + embedded browser control center
+  jobs.py agents.py      control-center job and agent lifecycle helpers
+  attention.py           user-attention records and resolution
   dispatcher.py          review-pr / feature orchestration + queue launch
   queue.py taskgraph.py  task queue + dependency DAG
   scheduler.py budget.py idle-worker dispatch + cost/rate-limit gating
