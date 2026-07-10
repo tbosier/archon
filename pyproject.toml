@@ -17,6 +17,8 @@ dependencies = [
   "pydantic>=2.7",
   "pyyaml>=6.0",
   "questionary>=2.0",
+  "fastapi>=0.111",
+  "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]

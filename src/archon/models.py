@@ -20,6 +20,22 @@ ProviderPolicy = Literal["single", "multi_review", "variants", "ask"]
 # execute/test = cheaper) and drives the plan→execute→review→test chain.
 Phase = Literal["plan", "execute", "review", "test"]
 WorkerState = Literal["idle", "busy", "offline"]
+JobStatus = Literal[
+    "intake", "planning", "awaiting_plan_approval", "running",
+    "attention_required", "verifying", "ready_for_pr", "ready_to_merge",
+    "complete", "failed", "cancelled",
+]
+AgentState = Literal[
+    "idle", "planning", "working", "waiting_on_dependency", "waiting_on_user",
+    "rate_limited", "running_tests", "reviewing", "failed", "complete",
+    "stale", "crashed",
+]
+AttentionKind = Literal[
+    "plan_approval", "architecture_decision", "api_contract_conflict",
+    "security_concern", "test_failure_decision", "permission_request",
+    "budget_or_rate_limit", "merge_approval", "provider_auth",
+]
+AttentionStatus = Literal["open", "resolved", "dismissed", "superseded"]
 
 TaskStatus = Literal[
     "queued", "starting", "running", "blocked", "stale",
@@ -59,6 +75,18 @@ STATUS_COLORS: dict[str, str] = {
     "missing": "red",
     "unknown": "dim",
     "error": "red",
+    "info": "dim",
+    "warn": "yellow",
+    "critical": "red",
+    "intake": "white",
+    "planning": "cyan",
+    "awaiting_plan_approval": "yellow",
+    "attention_required": "yellow",
+    "verifying": "blue",
+    "ready_for_pr": "cyan",
+    "ready_to_merge": "cyan",
+    "complete": "green",
+    "cancelled": "dim",
 }
 
 
@@ -109,6 +137,51 @@ class Provider:
 
 
 @dataclass
+class Job:
+    id: str
+    repo_id: int
+    title: str
+    objective: str
+    status: str = "intake"
+    constraints_json: str = "[]"
+    acceptance_criteria_json: str = "[]"
+    lead_agent_id: str | None = None
+    current_plan_json: str | None = None
+    finished_at: str | None = None
+
+
+@dataclass
+class Agent:
+    id: str
+    job_id: str
+    role: str
+    provider_id: str | None = None
+    display_name: str | None = None
+    state: str = "idle"
+    current_task_id: str | None = None
+    current_task_run_id: str | None = None
+    last_summary: str | None = None
+
+
+@dataclass
+class AttentionItem:
+    id: str
+    kind: str
+    severity: str
+    title: str
+    status: str = "open"
+    job_id: str | None = None
+    agent_id: str | None = None
+    task_id: str | None = None
+    task_run_id: str | None = None
+    summary: str | None = None
+    options_json: str = "[]"
+    recommended_option: str | None = None
+    resolution: str | None = None
+    resolved_at: str | None = None
+
+
+@dataclass
 class Task:
     id: str
     repo_id: int
@@ -122,6 +195,7 @@ class Task:
     phase: str = "execute"            # plan | execute | review | test
     parent_task_id: str | None = None  # groups a feature's plan/execute/review/test
     provider_id: str | None = None     # assigned provider for scheduler auto-dispatch
+    job_id: str | None = None          # product-level parent job
 
 
 @dataclass

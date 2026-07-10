@@ -15,10 +15,12 @@ import typer
 from rich.console import Console
 
 from . import (
+    attention,
     budget,
     db,
     dispatcher,
     hooks,
+    jobs,
     queue,
     scheduler,
     statusline,
@@ -41,7 +43,11 @@ app = typer.Typer(
     help="Archon — a Zellij-native command center for parallel AI coding agents.",
 )
 providers_app = typer.Typer(no_args_is_help=True, help="Inspect and manage provider CLIs.")
+jobs_app = typer.Typer(no_args_is_help=True, help="Create and inspect control-center jobs.")
+attention_app = typer.Typer(no_args_is_help=True, help="Inspect and resolve attention items.")
 app.add_typer(providers_app, name="providers")
+app.add_typer(jobs_app, name="jobs")
+app.add_typer(attention_app, name="attention")
 
 console = Console()
 err = Console(stderr=True)
@@ -169,6 +175,31 @@ def setup(
     save_config(config, paths)
     _sync_providers_to_db(conn, config)
     console.print(f"[green]saved providers:[/green] {', '.join(config.enabled_provider_ids()) or '(none)'}")
+
+
+@app.command()
+def server(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8716, "--port"),
+    reload: bool = typer.Option(False, "--reload"),
+) -> None:
+    """Start the local HTTP/SSE API for the control center."""
+    try:
+        import uvicorn
+    except ModuleNotFoundError:
+        raise typer.BadParameter("FastAPI server dependencies are not installed. Reinstall Archon from pyproject.toml.") from None
+    console.print(f"[cyan]archon server[/cyan] http://{host}:{port}")
+    uvicorn.run("archon.api:app", host=host, port=port, reload=reload)
+
+
+@app.command()
+def web(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8716, "--port"),
+    reload: bool = typer.Option(False, "--reload"),
+) -> None:
+    """Start the local API used by the browser control center."""
+    server(host=host, port=port, reload=reload)
 
 
 @app.command()
@@ -333,6 +364,116 @@ def providers_login(
     zellij.new_pane(ctx.session, login_pane_name(provider_id), str(ctx.root),
                     ["bash", "-lc", " ".join(launch.argv)])
     console.print(f"[cyan]login pane opened for {provider_id}[/cyan] — complete the flow, then `archon providers refresh`")
+
+
+# --------------------------------------------------------------------------- #
+# Jobs / attention
+# --------------------------------------------------------------------------- #
+
+@jobs_app.callback(invoke_without_command=True)
+def jobs_root(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
+    _, conn, _ = _open()
+    rows = db.list_jobs(conn)
+    if not rows:
+        console.print("[dim]no jobs yet[/dim]")
+        return
+    for row in rows:
+        console.print(
+            f"[cyan]{row['id']}[/cyan]  {row['status']:<22} "
+            f"{row['repo_name'] or '-':<18} {row['title']}"
+        )
+
+
+@jobs_app.command("create")
+def jobs_create(
+    title: str,
+    repo: Optional[Path] = typer.Option(None, help="Repository root."),
+    objective: Optional[str] = typer.Option(None, "--objective", "-o"),
+    constraint: list[str] = typer.Option(None, "--constraint", "-c"),
+    acceptance: list[str] = typer.Option(None, "--acceptance", "-a"),
+    provider_id: Optional[str] = typer.Option(None, "--provider"),
+) -> None:
+    """Create a durable job from structured input."""
+    _, conn, config = _open()
+    ctx = dispatcher.register_repo(conn, dispatcher.resolve_repo_context(repo, config=config))
+    job = jobs.create_job(
+        conn,
+        repo_id=ctx.repo_id or 0,
+        title=title,
+        objective=objective or title,
+        constraints=constraint or [],
+        acceptance_criteria=acceptance or [],
+        status="intake",
+        provider_id=provider_id,
+    )
+    console.print(f"[green]created[/green] {job.id}  {job.title}")
+
+
+@jobs_app.command("show")
+def jobs_show(job_id: str) -> None:
+    """Show a job with its tasks, agents, and open decisions."""
+    _, conn, _ = _open()
+    row = db.get_job(conn, job_id)
+    if row is None:
+        raise typer.BadParameter(f"No job found for '{job_id}'.")
+    console.print(f"[bold]{row['title']}[/bold]  [cyan]{row['id']}[/cyan]  {row['status']}")
+    console.print(f"repo: {row['repo_name'] or '-'}")
+    console.print(f"objective: {row['objective']}")
+    tasks = db.list_job_tasks(conn, job_id)
+    if tasks:
+        console.print("\n[bold]tasks[/bold]")
+        for t in tasks:
+            console.print(f"  {t['id']}  {t['phase']:<7} {t['status']:<10} {t['name']}")
+    agents_rows = db.list_agents(conn, job_id=job_id)
+    if agents_rows:
+        console.print("\n[bold]agents[/bold]")
+        for a in agents_rows:
+            console.print(f"  {a['id']}  {a['state']:<18} {a['display_name']}")
+    open_items = db.list_attention_items(conn, status="open", job_id=job_id)
+    if open_items:
+        console.print("\n[bold yellow]attention[/bold yellow]")
+        for item in open_items:
+            console.print(f"  {item['id']}  {item['kind']:<20} {item['title']}")
+
+
+@attention_app.callback(invoke_without_command=True)
+def attention_root(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
+    _, conn, _ = _open()
+    rows = db.list_attention_items(conn, status="open")
+    if not rows:
+        console.print("[dim]no open attention items[/dim]")
+        return
+    for item in rows:
+        console.print(
+            f"[yellow]{item['id']}[/yellow]  {item['kind']:<22} "
+            f"{item['severity']:<6} {item['title']}"
+        )
+
+
+@attention_app.command("resolve")
+def attention_resolve(
+    item_id: str,
+    resolution: str = typer.Option("approved", "--resolution", "-r"),
+    status: str = typer.Option("resolved", "--status"),
+    no_unblock: bool = typer.Option(False, "--no-unblock"),
+) -> None:
+    """Resolve an attention item and unblock its run by default."""
+    _, conn, _ = _open()
+    try:
+        attention.resolve_item(
+            conn,
+            item_id,
+            resolution=resolution,
+            status=status,
+            unblock=not no_unblock,
+        )
+    except KeyError:
+        raise typer.BadParameter(f"No attention item found for '{item_id}'.") from None
+    console.print(f"[green]{status}[/green] {item_id}")
 
 
 # --------------------------------------------------------------------------- #

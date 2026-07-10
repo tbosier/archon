@@ -19,7 +19,7 @@ from pathlib import Path
 PANE_BOOT_DELAY = float(os.environ.get("ARCHON_PANE_BOOT_DELAY", "3.5"))
 PANE_ENTER_DELAY = float(os.environ.get("ARCHON_PANE_ENTER_DELAY", "0.8"))
 
-from . import db, github, handoff, prompts
+from . import agents, db, github, handoff, jobs, prompts
 from .config import Config
 from .git_worktree import (
     WorktreeInfo,
@@ -173,6 +173,16 @@ def start_review(
         provider_policy="multi_review" if len(provider_ids) > 1 else "single",
         pr_number=pr_number,
     )
+    job = jobs.create_job(
+        conn,
+        repo_id=ctx.repo_id or 0,
+        title=task.name,
+        objective=f"Review PR #{pr_number}",
+        acceptance_criteria=["Review findings are recorded", "Risky changes are called out"],
+        status="running",
+        provider_id=provider_ids[0] if provider_ids else None,
+    )
+    task.job_id = job.id
     db.insert_task(conn, task)
     result = DispatchResult(task=task)
 
@@ -198,6 +208,17 @@ def start_review(
             zellij_pane_name=f"{pid}-pr-{pr_number}-review",
         )
         db.insert_task_run(conn, run)
+        agent = agents.create_agent(
+            conn,
+            job_id=job.id,
+            role="reviewer",
+            provider_id=pid,
+            display_name=f"{provider.display_name} Reviewer",
+            state="reviewing",
+        )
+        db.update_agent(
+            conn, agent.id, current_task_id=task.id, current_task_run_id=run.id
+        )
 
         prompt = prompts.pr_review_prompt(
             pr_number=pr_number,
@@ -250,6 +271,16 @@ def start_feature(
         prompt=prompt_text or f"Implement {feature_name}",
         provider_policy="variants" if multi else "single",
     )
+    job = jobs.create_job(
+        conn,
+        repo_id=ctx.repo_id or 0,
+        title=feature_name,
+        objective=prompt_text or f"Implement {feature_name}",
+        acceptance_criteria=["Implementation is complete", "Relevant checks pass"],
+        status="running",
+        provider_id=provider_ids[0] if provider_ids else None,
+    )
+    task.job_id = job.id
     db.insert_task(conn, task)
     result = DispatchResult(task=task)
 
@@ -281,6 +312,17 @@ def start_feature(
             zellij_pane_name=f"{pid}-feature-{sanitize_slug(feature_name)}",
         )
         db.insert_task_run(conn, run)
+        agent = agents.create_agent(
+            conn,
+            job_id=job.id,
+            role="implementer",
+            provider_id=pid,
+            display_name=f"{provider.display_name} Implementer",
+            state="working",
+        )
+        db.update_agent(
+            conn, agent.id, current_task_id=task.id, current_task_run_id=run.id
+        )
 
         prompt = prompts.feature_prompt(
             feature_name=feature_name,
@@ -379,6 +421,21 @@ def launch_task(conn, config: Config, task_row, *, zellij: Zellij | None = None,
         zellij_pane_name=f"{provider_id}-{phase}-{sanitize_slug(feature_name)}",
     )
     db.insert_task_run(conn, run)
+    if task_row["job_id"]:
+        role = {"plan": "lead", "review": "reviewer", "test": "tester"}.get(phase, "implementer")
+        display_role = {"plan": "Planner", "review": "Reviewer", "test": "Tester"}.get(phase, "Implementer")
+        state = {"plan": "planning", "review": "reviewing", "test": "running_tests"}.get(phase, "working")
+        agent = agents.create_agent(
+            conn,
+            job_id=task_row["job_id"],
+            role=role,
+            provider_id=provider_id,
+            display_name=f"{provider.display_name} {display_role}",
+            state=state,
+        )
+        db.update_agent(
+            conn, agent.id, current_task_id=task_row["id"], current_task_run_id=run.id
+        )
 
     prompt = _phase_prompt(phase, ctx, provider, wt, feature_name, task_row["prompt"])
     launch = provider.worker_launch(run, prompt, purpose=_PHASE_PURPOSE.get(phase, "feature"))
@@ -398,9 +455,19 @@ def make_scheduler_launch(zellij: Zellij | None = None, dry_run: bool | None = N
 def enqueue_feature(conn, config: Config, ctx: RepoContext, *, feature_name: str,
                     provider_id: str, prompt_text: str | None = None) -> dict:
     """Queue a feature as a plan -> execute chain (handoff adds review -> test)."""
+    job = jobs.create_job(
+        conn,
+        repo_id=ctx.repo_id or 0,
+        title=feature_name,
+        objective=prompt_text or f"Implement {feature_name}",
+        acceptance_criteria=["Plan is approved", "Implementation is complete", "Verification passes"],
+        status="planning" if config.scheduler.plan_before_execute else "running",
+        provider_id=provider_id,
+    )
     return handoff.enqueue_feature_chain(
         conn, config, repo_id=ctx.repo_id or 0, feature_name=feature_name,
         prompt=prompt_text or f"Implement {feature_name}", provider_id=provider_id,
+        job_id=job.id,
     )
 
 
@@ -417,4 +484,11 @@ def complete_task(conn, config: Config, task_id: str) -> dict:
     created: dict = {}
     if task["type"] == "feature" and task["phase"] == "execute":
         created = handoff.on_feature_done(conn, config, task)
+    if task["job_id"] and task["phase"] in ("test", "review"):
+        remaining = [
+            t for t in db.list_job_tasks(conn, task["job_id"])
+            if t["status"] not in ("done", "failed")
+        ]
+        if not remaining:
+            jobs.mark_finished(conn, task["job_id"], "complete")
     return {"task": task_id, "handoff": created}

@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from .models import Provider, Repo, Task, TaskRun, Worker
+from .models import Agent, AttentionItem, Job, Provider, Repo, Task, TaskRun, Worker
 from .paths import Paths, resolve_paths
 from .util import utc_now
 
@@ -53,6 +53,40 @@ CREATE TABLE IF NOT EXISTS provider_panes (
   FOREIGN KEY(repo_id) REFERENCES repos(id)
 );
 
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY,
+  repo_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  constraints_json TEXT NOT NULL DEFAULT '[]',
+  acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL,
+  lead_agent_id TEXT,
+  current_plan_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  finished_at TEXT,
+  FOREIGN KEY(repo_id) REFERENCES repos(id)
+);
+
+CREATE TABLE IF NOT EXISTS agents (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  provider_id TEXT,
+  display_name TEXT NOT NULL,
+  state TEXT NOT NULL,
+  current_task_id TEXT,
+  current_task_run_id TEXT,
+  last_summary TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(provider_id) REFERENCES providers(id),
+  FOREIGN KEY(current_task_id) REFERENCES tasks(id),
+  FOREIGN KEY(current_task_run_id) REFERENCES task_runs(id)
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   repo_id INTEGER NOT NULL,
@@ -66,6 +100,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   phase TEXT NOT NULL DEFAULT 'execute',
   parent_task_id TEXT,
   provider_id TEXT,
+  job_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   finished_at TEXT,
@@ -140,17 +175,47 @@ CREATE TABLE IF NOT EXISTS task_runs (
 
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id TEXT,
+  agent_id TEXT,
   task_id TEXT,
   task_run_id TEXT,
   provider_id TEXT,
   event_type TEXT NOT NULL,
   severity TEXT NOT NULL,
   message TEXT,
+  visibility TEXT NOT NULL DEFAULT 'normal',
+  requires_attention INTEGER NOT NULL DEFAULT 0,
+  summary TEXT,
+  details_json TEXT,
   raw_json TEXT,
   created_at TEXT NOT NULL,
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(agent_id) REFERENCES agents(id),
   FOREIGN KEY(task_id) REFERENCES tasks(id),
   FOREIGN KEY(task_run_id) REFERENCES task_runs(id),
   FOREIGN KEY(provider_id) REFERENCES providers(id)
+);
+
+CREATE TABLE IF NOT EXISTS attention_items (
+  id TEXT PRIMARY KEY,
+  job_id TEXT,
+  agent_id TEXT,
+  task_id TEXT,
+  task_run_id TEXT,
+  kind TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT,
+  options_json TEXT NOT NULL DEFAULT '[]',
+  recommended_option TEXT,
+  status TEXT NOT NULL,
+  resolution TEXT,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  FOREIGN KEY(job_id) REFERENCES jobs(id),
+  FOREIGN KEY(agent_id) REFERENCES agents(id),
+  FOREIGN KEY(task_id) REFERENCES tasks(id),
+  FOREIGN KEY(task_run_id) REFERENCES task_runs(id)
 );
 
 CREATE TABLE IF NOT EXISTS transcript_events (
@@ -216,8 +281,16 @@ def connect_memory() -> sqlite3.Connection:
 # Columns added after 0.1.0; applied to pre-existing databases on connect.
 _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "tasks": [("phase", "TEXT NOT NULL DEFAULT 'execute'"), ("parent_task_id", "TEXT"),
-              ("provider_id", "TEXT")],
+              ("provider_id", "TEXT"), ("job_id", "TEXT")],
     "task_runs": [("phase", "TEXT NOT NULL DEFAULT 'execute'"), ("model", "TEXT")],
+    "events": [
+        ("job_id", "TEXT"),
+        ("agent_id", "TEXT"),
+        ("visibility", "TEXT NOT NULL DEFAULT 'normal'"),
+        ("requires_attention", "INTEGER NOT NULL DEFAULT 0"),
+        ("summary", "TEXT"),
+        ("details_json", "TEXT"),
+    ],
 }
 
 
@@ -254,6 +327,14 @@ def upsert_repo(conn: sqlite3.Connection, repo: Repo) -> int:
     conn.commit()
     row = conn.execute("SELECT id FROM repos WHERE root_path=?", (repo.root_path,)).fetchone()
     return int(row["id"])
+
+
+def get_repo(conn: sqlite3.Connection, repo_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM repos WHERE id=?", (repo_id,)).fetchone()
+
+
+def list_repos(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM repos ORDER BY updated_at DESC, name").fetchall()
 
 
 # --- Providers --------------------------------------------------------------
@@ -302,6 +383,223 @@ def list_providers(conn: sqlite3.Connection) -> list[Provider]:
     ]
 
 
+# --- Jobs / agents / attention ---------------------------------------------
+
+def insert_job(conn: sqlite3.Connection, job: Job) -> None:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO jobs
+          (id, repo_id, title, objective, constraints_json,
+           acceptance_criteria_json, status, lead_agent_id, current_plan_json,
+           created_at, updated_at, finished_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job.id, job.repo_id, job.title, job.objective, job.constraints_json,
+            job.acceptance_criteria_json, job.status, job.lead_agent_id,
+            job.current_plan_json, now, now, job.finished_at,
+        ),
+    )
+    conn.commit()
+
+
+def update_job(conn: sqlite3.Connection, job_id: str, **fields) -> None:
+    allowed = {
+        "title", "objective", "constraints_json", "acceptance_criteria_json",
+        "status", "lead_agent_id", "current_plan_json", "finished_at",
+    }
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
+        return
+    assignments = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(
+        f"UPDATE jobs SET {assignments}, updated_at=? WHERE id=?",
+        (*fields.values(), utc_now(), job_id),
+    )
+    conn.commit()
+
+
+def get_job(conn: sqlite3.Connection, job_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT j.*, r.name AS repo_name, r.root_path AS repo_root_path,
+               r.zellij_session AS zellij_session
+        FROM jobs j
+        LEFT JOIN repos r ON r.id = j.repo_id
+        WHERE j.id=?
+        """,
+        (job_id,),
+    ).fetchone()
+
+
+def list_jobs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT j.*, r.name AS repo_name, r.root_path AS repo_root_path,
+               r.zellij_session AS zellij_session,
+               COALESCE(open_attention.count, 0) AS open_attention_count
+        FROM jobs j
+        LEFT JOIN repos r ON r.id = j.repo_id
+        LEFT JOIN (
+          SELECT job_id, COUNT(*) AS count
+          FROM attention_items
+          WHERE status='open'
+          GROUP BY job_id
+        ) open_attention ON open_attention.job_id = j.id
+        ORDER BY j.updated_at DESC, j.created_at DESC
+        """
+    ).fetchall()
+
+
+def list_job_tasks(conn: sqlite3.Connection, job_id: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM tasks WHERE job_id=? ORDER BY created_at", (job_id,)
+    ).fetchall()
+
+
+def insert_agent(conn: sqlite3.Connection, agent: Agent) -> None:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO agents
+          (id, job_id, role, provider_id, display_name, state, current_task_id,
+           current_task_run_id, last_summary, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            agent.id, agent.job_id, agent.role, agent.provider_id,
+            agent.display_name or agent.role.title(), agent.state,
+            agent.current_task_id, agent.current_task_run_id, agent.last_summary,
+            now, now,
+        ),
+    )
+    conn.commit()
+
+
+def update_agent(conn: sqlite3.Connection, agent_id: str, **fields) -> None:
+    allowed = {
+        "role", "provider_id", "display_name", "state", "current_task_id",
+        "current_task_run_id", "last_summary",
+    }
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
+        return
+    assignments = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(
+        f"UPDATE agents SET {assignments}, updated_at=? WHERE id=?",
+        (*fields.values(), utc_now(), agent_id),
+    )
+    conn.commit()
+
+
+def get_agent(conn: sqlite3.Connection, agent_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+
+
+def list_agents(conn: sqlite3.Connection, job_id: str | None = None) -> list[sqlite3.Row]:
+    if job_id:
+        return conn.execute(
+            "SELECT * FROM agents WHERE job_id=? ORDER BY role, created_at", (job_id,)
+        ).fetchall()
+    return conn.execute(
+        """
+        SELECT a.*, j.title AS job_title
+        FROM agents a
+        LEFT JOIN jobs j ON j.id = a.job_id
+        ORDER BY a.updated_at DESC, a.created_at DESC
+        """
+    ).fetchall()
+
+
+def insert_attention_item(conn: sqlite3.Connection, item: AttentionItem) -> None:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO attention_items
+          (id, job_id, agent_id, task_id, task_run_id, kind, severity, title,
+           summary, options_json, recommended_option, status, resolution,
+           created_at, resolved_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            item.id, item.job_id, item.agent_id, item.task_id, item.task_run_id,
+            item.kind, item.severity, item.title, item.summary,
+            item.options_json, item.recommended_option, item.status,
+            item.resolution, now, item.resolved_at,
+        ),
+    )
+    conn.commit()
+
+
+def get_attention_item(conn: sqlite3.Connection, item_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM attention_items WHERE id=?", (item_id,)).fetchone()
+
+
+def find_open_attention_item(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    task_run_id: str | None = None,
+    task_id: str | None = None,
+    job_id: str | None = None,
+) -> sqlite3.Row | None:
+    clauses = ["kind=?", "status='open'"]
+    values: list[object] = [kind]
+    for column, value in (("task_run_id", task_run_id), ("task_id", task_id), ("job_id", job_id)):
+        if value is not None:
+            clauses.append(f"{column}=?")
+            values.append(value)
+    return conn.execute(
+        f"SELECT * FROM attention_items WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT 1",
+        values,
+    ).fetchone()
+
+
+def list_attention_items(
+    conn: sqlite3.Connection,
+    *,
+    status: str | None = None,
+    job_id: str | None = None,
+) -> list[sqlite3.Row]:
+    clauses = []
+    values: list[object] = []
+    if status:
+        clauses.append("ai.status=?")
+        values.append(status)
+    if job_id:
+        clauses.append("ai.job_id=?")
+        values.append(job_id)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return conn.execute(
+        f"""
+        SELECT ai.*, j.title AS job_title, a.display_name AS agent_name
+        FROM attention_items ai
+        LEFT JOIN jobs j ON j.id = ai.job_id
+        LEFT JOIN agents a ON a.id = ai.agent_id
+        {where}
+        ORDER BY
+          CASE ai.status WHEN 'open' THEN 0 ELSE 1 END,
+          ai.created_at DESC
+        """,
+        values,
+    ).fetchall()
+
+
+def resolve_attention_item(
+    conn: sqlite3.Connection,
+    item_id: str,
+    *,
+    resolution: str,
+    status: str = "resolved",
+) -> None:
+    conn.execute(
+        "UPDATE attention_items SET status=?, resolution=?, resolved_at=? WHERE id=?",
+        (status, resolution, utc_now(), item_id),
+    )
+    conn.commit()
+
+
 # --- Tasks ------------------------------------------------------------------
 
 def insert_task(conn: sqlite3.Connection, task: Task) -> None:
@@ -310,13 +608,15 @@ def insert_task(conn: sqlite3.Connection, task: Task) -> None:
         """
         INSERT INTO tasks
           (id, repo_id, type, name, status, priority, pr_number, prompt,
-           provider_policy, phase, parent_task_id, provider_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           provider_policy, phase, parent_task_id, provider_id, job_id,
+           created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             task.id, task.repo_id, task.type, task.name, task.status,
             task.priority, task.pr_number, task.prompt, task.provider_policy,
-            task.phase, task.parent_task_id, task.provider_id, now, now,
+            task.phase, task.parent_task_id, task.provider_id, task.job_id,
+            now, now,
         ),
     )
     conn.commit()
@@ -334,6 +634,14 @@ def set_task_status(conn: sqlite3.Connection, task_id: str, status: str) -> None
     conn.execute(
         "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
         (status, utc_now(), task_id),
+    )
+    conn.commit()
+
+
+def set_task_job(conn: sqlite3.Connection, task_id: str, job_id: str | None) -> None:
+    conn.execute(
+        "UPDATE tasks SET job_id=?, updated_at=? WHERE id=?",
+        (job_id, utc_now(), task_id),
     )
     conn.commit()
 
@@ -388,7 +696,7 @@ def find_task_run(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
 def list_task_runs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT tr.*, t.name AS task_name, t.type AS task_type, "
-        "       COALESCE(r.name, '-') AS repo_name "
+        "       t.job_id AS job_id, COALESCE(r.name, '-') AS repo_name "
         "FROM task_runs tr "
         "JOIN tasks t ON t.id = tr.task_id "
         "LEFT JOIN repos r ON r.id = t.repo_id "
@@ -404,22 +712,67 @@ def insert_event(
     event_type: str,
     severity: str = "info",
     message: str | None = None,
+    job_id: str | None = None,
+    agent_id: str | None = None,
     task_id: str | None = None,
     task_run_id: str | None = None,
     provider_id: str | None = None,
+    visibility: str = "normal",
+    requires_attention: bool = False,
+    summary: str | None = None,
+    details_json: str | None = None,
     raw_json: str | None = None,
 ) -> None:
+    if job_id is None and task_id is not None:
+        row = get_task(conn, task_id)
+        if row is not None:
+            job_id = row["job_id"]
     conn.execute(
         """
         INSERT INTO events
-          (task_id, task_run_id, provider_id, event_type, severity, message,
-           raw_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          (job_id, agent_id, task_id, task_run_id, provider_id, event_type,
+           severity, message, visibility, requires_attention, summary,
+           details_json, raw_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (task_id, task_run_id, provider_id, event_type, severity, message,
-         raw_json, utc_now()),
+        (
+            job_id, agent_id, task_id, task_run_id, provider_id, event_type,
+            severity, message, visibility, int(requires_attention), summary,
+            details_json, raw_json, utc_now(),
+        ),
     )
     conn.commit()
+
+
+def list_events(
+    conn: sqlite3.Connection,
+    *,
+    after_id: int | None = None,
+    job_id: str | None = None,
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    clauses = []
+    values: list[object] = []
+    if after_id is not None:
+        clauses.append("e.id > ?")
+        values.append(after_id)
+    if job_id is not None:
+        clauses.append("e.job_id = ?")
+        values.append(job_id)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    values.append(limit)
+    return conn.execute(
+        f"""
+        SELECT e.*, j.title AS job_title, a.display_name AS agent_name
+        FROM events e
+        LEFT JOIN jobs j ON j.id = e.job_id
+        LEFT JOIN agents a ON a.id = e.agent_id
+        {where}
+        ORDER BY e.id DESC
+        LIMIT ?
+        """,
+        values,
+    ).fetchall()
 
 
 # --- Task dependency graph (DAG) --------------------------------------------

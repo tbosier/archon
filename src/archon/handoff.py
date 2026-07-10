@@ -26,6 +26,7 @@ def enqueue_feature_chain(
     feature_name: str,
     prompt: str,
     provider_id: str,
+    job_id: str | None = None,
     base_execute_task_id: str | None = None,
 ) -> dict:
     """Queue a feature as ``plan -> execute`` (or just ``execute``).
@@ -47,6 +48,7 @@ def enqueue_feature_chain(
             prompt=prompt,
             phase="plan",
             provider_id=provider_id,
+            job_id=job_id,
         )
         parent_id = plan_task.id
     else:
@@ -61,6 +63,7 @@ def enqueue_feature_chain(
         phase="execute",
         provider_id=provider_id,
         parent_task_id=parent_id,
+        job_id=job_id,
         depends_on=[base_execute_task_id] if base_execute_task_id else None,
     )
 
@@ -97,6 +100,7 @@ def on_feature_done(conn: sqlite3.Connection, config, execute_task_row) -> dict:
         phase="review",
         provider_id=provider_id,
         parent_task_id=parent_id,
+        job_id=execute_task_row["job_id"],
         depends_on=[execute_id],
     )
 
@@ -109,6 +113,7 @@ def on_feature_done(conn: sqlite3.Connection, config, execute_task_row) -> dict:
         phase="test",
         provider_id=provider_id,
         parent_task_id=parent_id,
+        job_id=execute_task_row["job_id"],
         depends_on=[review_task.id],
     )
 

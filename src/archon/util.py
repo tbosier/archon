@@ -13,6 +13,9 @@ from typing import Any
 
 # Monotonic per-process counter keeps IDs unique within a single invocation.
 _task_seq = count(1)
+_job_seq = count(1)
+_agent_seq = count(1)
+_attention_seq = count(1)
 # A short token minted once per process disambiguates IDs across separate CLI
 # invocations that land in the same second (each `archon` run is a new process,
 # so the counter alone would collide in a shared database).
@@ -31,6 +34,21 @@ def _date_stamp() -> str:
 def new_task_id() -> str:
     """Stable, sortable, process-unique task id: ``TASK-<YYYYMMDD>-<NNN><proc>``."""
     return f"TASK-{_date_stamp()}-{next(_task_seq):03d}{_PROC}"
+
+
+def new_job_id() -> str:
+    """Stable, sortable, process-unique job id: ``JOB-<YYYYMMDD>-<NNN><proc>``."""
+    return f"JOB-{_date_stamp()}-{next(_job_seq):03d}{_PROC}"
+
+
+def new_agent_id(role: str) -> str:
+    """Stable agent id with the role in the suffix for easier debugging."""
+    return f"AGENT-{_date_stamp()}-{next(_agent_seq):03d}{_PROC}-{sanitize_slug(role)}"
+
+
+def new_attention_id() -> str:
+    """Stable, sortable attention item id."""
+    return f"ATTN-{_date_stamp()}-{next(_attention_seq):03d}{_PROC}"
 
 
 def run_id_for(task_id: str, provider_id: str) -> str:

@@ -106,12 +106,50 @@ def workers_table(conn: sqlite3.Connection) -> Table:
     return table
 
 
+def jobs_table(conn: sqlite3.Connection) -> Table:
+    table = Table(title="JOBS", title_style="bold cyan", expand=True, header_style="bold")
+    for col in ("Job", "Repo", "Status", "Open Decisions", "Title"):
+        table.add_column(col, overflow="fold")
+    for j in db.list_jobs(conn):
+        table.add_row(
+            j["id"],
+            j["repo_name"] or "-",
+            _status_text(j["status"]),
+            str(j["open_attention_count"]),
+            j["title"],
+        )
+    if not table.rows:
+        table.add_row("(no jobs yet)", "", "", "", "")
+    return table
+
+
+def attention_table(conn: sqlite3.Connection) -> Table:
+    table = Table(title="ATTENTION REQUIRED", title_style="bold yellow", expand=True, header_style="bold")
+    for col in ("Item", "Kind", "Severity", "Job", "Decision"):
+        table.add_column(col, overflow="fold")
+    for item in db.list_attention_items(conn, status="open"):
+        table.add_row(
+            item["id"],
+            item["kind"],
+            _status_text(item["severity"]),
+            item["job_title"] or "-",
+            item["title"],
+        )
+    if not table.rows:
+        table.add_row("(none)", "", "", "", "")
+    return table
+
+
 def render(conn: sqlite3.Connection) -> Group:
     return Group(
         Panel.fit(
             Text("ARCHON", style="bold cyan") + Text("  ·  parallel AI coding cockpit", style="dim"),
             border_style="cyan",
         ),
+        jobs_table(conn),
+        Text(""),
+        attention_table(conn),
+        Text(""),
         providers_table(conn),
         Text(""),
         workers_table(conn),

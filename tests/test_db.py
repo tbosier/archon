@@ -6,7 +6,8 @@ def test_schema_initializes_cleanly(conn):
     names = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
     )}
-    for expected in ("repos", "providers", "tasks", "task_runs", "events",
+    for expected in ("repos", "providers", "jobs", "agents", "attention_items",
+                     "tasks", "task_runs", "events",
                      "transcript_events", "transcript_fts", "file_touches",
                      "provider_panes"):
         assert expected in names

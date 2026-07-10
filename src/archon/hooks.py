@@ -16,7 +16,7 @@ import json
 import os
 import sys
 
-from . import db, notify
+from . import attention, db, notify
 from .paths import resolve_paths
 from .statusline import infer_task_run_id
 from .util import append_event_line, utc_now
@@ -154,6 +154,12 @@ def handle_hook(
         if conn is not None and run_id:
             try:
                 db.set_task_run_status(conn, run_id, "blocked")
+                attention.open_permission_item(
+                    conn,
+                    task_run_id=run_id,
+                    title=str(message) if message is not None else f"{hook_name}",
+                    summary=f"Provider requested permission via {hook_name}.",
+                )
             except Exception:
                 pass
         try:
