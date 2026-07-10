@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -270,7 +271,7 @@ def create_app(*, paths: Paths | None = None, db_path: Path | None = None) -> Fa
 
     @app.get("/api/runs")
     def list_runs(conn: sqlite3.Connection = Depends(conn_dep)) -> list[dict[str, Any]]:
-        return _rows(db.list_task_runs(conn))
+        return [_augment_run_for_ui(dict(row)) for row in db.list_task_runs(conn)]
 
     @app.post("/api/schedule")
     def run_schedule(
@@ -371,6 +372,27 @@ def create_app(*, paths: Paths | None = None, db_path: Path | None = None) -> Fa
         )
         return dict(db.find_task_run(conn, run_id))
 
+    @app.post("/api/runs/{run_id}/send-enter")
+    def send_enter_to_run(run_id: str, conn: sqlite3.Connection = Depends(conn_dep)) -> dict[str, Any]:
+        run = db.find_task_run(conn, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        if not run["zellij_session"] or not run["zellij_pane_id"]:
+            raise HTTPException(status_code=409, detail="run has no terminal pane")
+        Zellij().send_enter(run["zellij_session"], run["zellij_pane_id"])
+        db.insert_event(
+            conn,
+            event_type="task_run_input_sent",
+            severity="info",
+            message=f"sent Enter to {run_id}",
+            task_id=run["task_id"],
+            task_run_id=run_id,
+            provider_id=run["provider_id"],
+        )
+        updated = dict(db.find_task_run(conn, run_id))
+        updated.update({"input_sent": True})
+        return updated
+
     @app.post("/api/runs/{run_id}/focus-terminal")
     def focus_terminal(run_id: str, conn: sqlite3.Connection = Depends(conn_dep)) -> dict[str, Any]:
         run = db.find_task_run(conn, run_id)
@@ -432,8 +454,42 @@ def _feature_name_from_message(message: str) -> str:
         if first.lower().startswith(prefix):
             first = first[len(prefix):]
             break
+    first = re.split(r"\b(?:it should|should|does not|doesn't|use good|actually skip)\b", first, flags=re.I)[0]
+    first = re.sub(r"\b(?:something dumb like|for something dumb like|regular ol)\b", "", first, flags=re.I)
+    first = re.sub(r"^(?:a|an|the)\s+", "", first.strip(), flags=re.I)
     words = first.replace(".", " ").strip().split()
-    return " ".join(words[:8]) or "new task"
+    return " ".join(words[:5]) or "new task"
+
+
+def _augment_run_for_ui(run: dict[str, Any]) -> dict[str, Any]:
+    run["needs_attention"] = False
+    run["attention_reason"] = None
+    if run.get("status") not in {"running", "starting", "blocked", "stale", "queued"}:
+        return run
+    session = run.get("zellij_session")
+    pane_id = run.get("zellij_pane_id")
+    if not session or not pane_id:
+        return run
+
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(pane_id))
+    dump_path = Path("/tmp") / f"archon-pane-{safe_id}.txt"
+    try:
+        dump_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    Zellij().dump_screen(str(session), str(pane_id), str(dump_path))
+    try:
+        screen = dump_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return run
+
+    if "Waiting to run:" in screen and "<ENTER> run" in screen:
+        run["needs_attention"] = True
+        run["attention_reason"] = "Waiting for command approval in the terminal"
+    elif "Please run /login" in screen or "Not logged in" in screen:
+        run["needs_attention"] = True
+        run["attention_reason"] = "Provider is asking for login"
+    return run
 
 
 CONTROL_CENTER_HTML = """<!doctype html>
@@ -470,8 +526,8 @@ CONTROL_CENTER_HTML = """<!doctype html>
     .shell {
       min-height: 100vh;
       display: grid;
-      grid-template-columns: 312px minmax(520px, 1fr) 380px;
-      grid-template-rows: 68px minmax(0, 1fr);
+      grid-template-columns: 360px minmax(520px, 1fr) 400px;
+      grid-template-rows: 76px minmax(0, 1fr);
     }
     header {
       grid-column: 1 / -1;
@@ -483,31 +539,60 @@ CONTROL_CENTER_HTML = """<!doctype html>
       border-bottom: 1px solid var(--border);
       background: #0c1118;
     }
-    .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+    .brand { display: flex; align-items: center; gap: 16px; min-width: 0; }
     .brand-mark {
-      width: 24px;
-      height: 24px;
+      width: 30px;
+      height: 30px;
       flex: 0 0 auto;
       background: linear-gradient(135deg, #d7c1ff 0%, var(--accent-active) 48%, var(--state-running) 100%);
-      filter: drop-shadow(0 0 8px rgba(185, 143, 255, .28));
+      filter: drop-shadow(0 0 10px rgba(185, 143, 255, .34));
       -webkit-mask: url('/brand/archon-mark-mono.svg') center / contain no-repeat;
       mask: url('/brand/archon-mark-mono.svg') center / contain no-repeat;
     }
+    .brand-wordmark { display: flex; align-items: baseline; gap: 18px; min-width: 0; }
     .brand h1 {
       margin: 0;
       font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 18px;
+      font-size: 28px;
       font-weight: 720;
       letter-spacing: 0;
       text-transform: uppercase;
     }
-    .health { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-    .chip {
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      padding: 6px 9px;
+    .breadcrumb {
+      min-width: 0;
       color: var(--text-muted);
-      background: var(--bg-1);
+      font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 23px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .health {
+      display: flex;
+      align-items: baseline;
+      gap: 20px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      color: var(--text-muted);
+      font-size: 19px;
+    }
+    .stat {
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+    .stat strong {
+      color: var(--text-primary);
+      font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 700;
+    }
+    .stat.running strong { color: var(--state-running); }
+    .stat-divider {
+      width: 1px;
+      height: 24px;
+      background: var(--border);
+    }
+    .chip {
+      color: var(--text-muted);
       font-size: 12px;
       white-space: nowrap;
     }
@@ -518,13 +603,14 @@ CONTROL_CENTER_HTML = """<!doctype html>
       background: var(--bg-1);
     }
     section.activity { border-right: 0; }
-    .pane { padding: 18px; overflow: auto; }
+    .pane { padding: 24px 30px; overflow: auto; }
     .pane h2, .panel h2 {
       margin: 0 0 12px;
-      font-size: 12px;
+      font-size: 24px;
       text-transform: uppercase;
       color: var(--text-muted);
-      font-weight: 760;
+      font-weight: 560;
+      letter-spacing: 2px;
     }
     label { display: block; margin: 12px 0 6px; color: var(--text-muted); font-size: 12px; }
     input, select, textarea {
@@ -545,7 +631,7 @@ CONTROL_CENTER_HTML = """<!doctype html>
     button {
       border: 1px solid #48636b;
       border-radius: 7px;
-      background: #2a2440;
+      background: var(--bg-2);
       color: var(--text-primary);
       padding: 10px 13px;
       cursor: pointer;
@@ -553,6 +639,12 @@ CONTROL_CENTER_HTML = """<!doctype html>
       white-space: nowrap;
     }
     button:hover { background: #352c52; }
+    button.primary {
+      border-color: #b98fff;
+      background: #b98fff;
+      color: #150d24;
+    }
+    button.primary:hover { background: #c9a9ff; }
     button.secondary { background: var(--bg-2); border-color: var(--border); }
     button.danger { background: #3a2024; border-color: #6b3238; color: #ffd2d2; }
     button.danger:hover { background: #4b282d; }
@@ -562,25 +654,59 @@ CONTROL_CENTER_HTML = """<!doctype html>
     .workbench {
       display: grid;
       grid-template-rows: auto minmax(0, 1fr);
-      gap: 16px;
-      padding: 18px;
+      gap: 28px;
+      padding: 32px 38px;
       overflow: hidden;
       background: var(--bg-0);
     }
     .panel {
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: 18px;
       background: var(--bg-1);
-      padding: 16px;
+      padding: 28px 32px;
     }
     .panel.primary {
       border-color: #3b2d54;
       background: linear-gradient(180deg, #121824 0%, var(--bg-1) 100%);
       box-shadow: 0 0 0 1px rgba(185, 143, 255, .08), 0 12px 34px rgba(0,0,0,.22);
     }
-    .command textarea { min-height: 150px; }
+    .panel-title {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+    .panel-title h2 { margin: 0; }
+    .panel-meta {
+      min-width: 0;
+      color: var(--text-muted);
+      font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 18px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .command textarea { min-height: 116px; font-size: 28px; }
     .command .row { justify-content: space-between; margin-top: 12px; align-items: center; }
-    .hint { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+    .hint { color: var(--text-muted); font-size: 13px; overflow-wrap: anywhere; }
+    .live {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .live::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--state-done);
+      box-shadow: 0 0 10px rgba(74, 222, 128, .5);
+    }
     .feed-grid {
       min-height: 0;
       display: grid;
@@ -628,13 +754,24 @@ CONTROL_CENTER_HTML = """<!doctype html>
     }
     .list { display: flex; flex-direction: column; gap: 8px; }
     .item {
-      padding: 10px;
+      padding: 20px 20px;
       border: 1px solid var(--border);
-      border-radius: 7px;
+      border-left: 4px solid transparent;
+      border-radius: 0;
       background: var(--bg-2);
     }
-    .item strong { display: block; font-size: 13px; margin-bottom: 4px; overflow-wrap: anywhere; }
-    .item span { display: block; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+    .item.waiting { border-left-color: var(--state-waiting); }
+    .item.running { border-left-color: var(--state-running); }
+    .item.done { border-left-color: var(--state-done); }
+    .item.error { border-left-color: var(--state-error); }
+    .item.active { border-left-color: var(--accent-active); }
+    .item.needs-attention {
+      background: #211b12;
+      border-color: #594522;
+      border-left-color: var(--state-waiting);
+    }
+    .item strong { display: block; font-size: 24px; font-weight: 560; margin-bottom: 10px; overflow-wrap: anywhere; }
+    .item span { display: block; color: var(--text-muted); font-size: 13px; overflow-wrap: anywhere; }
     .attention { border-color: #6d5a28; background: #242016; }
     .error { color: var(--state-error); }
     .empty { color: var(--text-muted); font-size: 13px; padding: 8px 0; }
@@ -664,11 +801,19 @@ CONTROL_CENTER_HTML = """<!doctype html>
       display: inline-flex;
       align-items: center;
       border-radius: 999px;
-      padding: 3px 7px;
-      font-size: 11px;
-      font-weight: 700;
-      border: 1px solid currentColor;
-      background: rgba(255,255,255,.035);
+      padding: 0;
+      font-size: 18px;
+      font-weight: 500;
+      border: 0;
+      background: transparent;
+    }
+    .token::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: currentColor;
+      margin-right: 9px;
     }
     .token.waiting { color: var(--state-waiting); }
     .token.running { color: var(--state-running); }
@@ -678,19 +823,40 @@ CONTROL_CENTER_HTML = """<!doctype html>
     .meta-line {
       display: flex;
       align-items: center;
-      gap: 7px;
+      gap: 12px;
       flex-wrap: wrap;
       color: var(--text-muted);
-      font-size: 12px;
+      font-size: 16px;
     }
-    time { font-size: 11px; color: var(--text-muted); }
-    .run-actions { display: flex; gap: 6px; margin-top: 9px; }
-    .run-actions button { padding: 6px 8px; font-size: 12px; }
-    details.item summary {
+    time { font-size: 15px; color: var(--text-muted); }
+    .run-actions { display: flex; gap: 10px; margin-top: 16px; }
+    .run-actions button { padding: 8px 14px; font-size: 16px; }
+    .attention-reason {
+      margin-top: 12px;
+      color: var(--state-waiting);
+      font-size: 13px;
+    }
+    .event-list { gap: 0; }
+    .event-row {
+      padding: 18px 0;
+      border-bottom: 1px solid var(--border);
+      background: transparent;
+    }
+    .event-row:first-child { padding-top: 0; }
+    .event-row:last-child { border-bottom: 0; }
+    .event-row strong {
+      display: block;
+      font-size: 25px;
+      line-height: 1.32;
+      font-weight: 480;
+      margin-bottom: 10px;
+      overflow-wrap: anywhere;
+    }
+    details.event-row summary {
       cursor: pointer;
       list-style: none;
     }
-    details.item summary::-webkit-details-marker { display: none; }
+    details.event-row summary::-webkit-details-marker { display: none; }
     .event-detail {
       margin-top: 9px;
       padding-top: 9px;
@@ -711,10 +877,34 @@ CONTROL_CENTER_HTML = """<!doctype html>
       display: none;
       overflow-wrap: anywhere;
     }
+    .sidebar-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    .sidebar-head h2 { margin: 0; }
+    .workspace-config {
+      margin-top: 24px;
+      border-top: 1px solid var(--border);
+      padding-top: 18px;
+    }
+    .workspace-config summary {
+      cursor: pointer;
+      color: var(--text-muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1.3px;
+      list-style: none;
+    }
+    .workspace-config summary::-webkit-details-marker { display: none; }
     @media (max-width: 1100px) {
-      .shell { grid-template-columns: 1fr; grid-template-rows: 68px auto minmax(620px, 1fr) auto; }
+      .shell { grid-template-columns: 1fr; grid-template-rows: 76px auto minmax(620px, 1fr) auto; }
       aside, main, section.activity { border-right: 0; border-bottom: 1px solid var(--border); }
       .feed-grid { grid-template-columns: 1fr; }
+      .brand h1 { font-size: 22px; }
+      .breadcrumb { display: none; }
     }
   </style>
 </head>
@@ -723,36 +913,44 @@ CONTROL_CENTER_HTML = """<!doctype html>
     <header>
       <div class="brand">
         <span class="brand-mark" aria-hidden="true"></span>
-        <h1>ARCHON</h1>
+        <div class="brand-wordmark">
+          <h1>ARCHON</h1>
+          <span class="breadcrumb" id="headerRepo">/ no repo</span>
+        </div>
       </div>
       <div class="health" id="health"></div>
     </header>
     <aside class="pane">
-      <h2>Workspace</h2>
-      <label for="repoPath">Repo path</label>
-      <div class="row">
-        <input id="repoPath" placeholder="/path/to/repo">
-        <button class="secondary" id="registerRepo">Add</button>
+      <div class="sidebar-head">
+        <h2>Open Jobs</h2>
       </div>
-      <div class="toast" id="workspaceError"></div>
-      <label for="repoSelect">Repository</label>
-      <select id="repoSelect"></select>
-      <label for="providerSelect">Provider</label>
-      <select id="providerSelect"></select>
-      <div style="height:20px"></div>
-      <h2>Open Jobs</h2>
       <div class="list" id="jobs"></div>
+      <details class="workspace-config" id="workspaceConfig">
+        <summary>Workspace</summary>
+        <label for="repoPath">Repo path</label>
+        <div class="row">
+          <input id="repoPath" placeholder="/path/to/repo">
+          <button class="secondary" id="registerRepo">Add</button>
+        </div>
+        <div class="toast" id="workspaceError"></div>
+        <label for="repoSelect">Repository</label>
+        <select id="repoSelect"></select>
+        <label for="providerSelect">Provider</label>
+        <select id="providerSelect"></select>
+      </details>
     </aside>
     <main class="workbench">
       <form class="panel command" id="chatForm">
-        <h2>Command</h2>
+        <div class="panel-title">
+          <h2>Command</h2>
+          <span class="panel-meta" id="commandMeta"></span>
+        </div>
         <textarea id="message" placeholder="Build a frontend control panel for simulation runs"></textarea>
         <div class="row">
-          <span class="hint" id="selectionHint"></span>
+          <span class="live" id="selectionHint">live</span>
           <div class="row">
             <button class="secondary" type="button" id="scheduleNow">Schedule</button>
-            <button class="secondary" type="button" id="refresh">Refresh</button>
-            <button type="submit" id="send">Send</button>
+            <button class="primary" type="submit" id="send">Send</button>
           </div>
         </div>
         <div class="toast" id="commandError"></div>
@@ -771,8 +969,8 @@ CONTROL_CENTER_HTML = """<!doctype html>
           </div>
         </section>
         <section class="panel scroll">
-          <h2>Recent Activity</h2>
-          <div class="list" id="events"></div>
+          <h2>Activity</h2>
+          <div class="list event-list" id="events"></div>
         </section>
       </div>
     </main>
@@ -846,25 +1044,37 @@ CONTROL_CENTER_HTML = """<!doctype html>
       ]);
       state.repos = repos;
       state.providers = providers.filter((p) => p.enabled);
-      el('health').innerHTML = `
-        <span class="chip"><strong>${health.repos}</strong> ${plural(health.repos, 'repo')}</span>
-        <span class="chip"><strong>${health.jobs}</strong> ${plural(health.jobs, 'job')}</span>
-        <span class="chip"><strong>${health.open_attention}</strong> ${plural(health.open_attention, 'decision')}</span>
-      `;
-
+      if (!repos.length) el('workspaceConfig').open = true;
       const repoSelect = el('repoSelect');
       const selectedRepo = repoSelect.value;
       repoSelect.replaceChildren();
       repoSelect.appendChild(option('', ''));
       repos.forEach((repo) => repoSelect.appendChild(option(repo.id, `${repo.name}  ${repo.root_path}`)));
-      if (selectedRepo) repoSelect.value = selectedRepo;
+      if (selectedRepo && repos.some((repo) => String(repo.id) === selectedRepo)) {
+        repoSelect.value = selectedRepo;
+      } else if (repos.length) {
+        repoSelect.value = String(repos[0].id);
+      }
 
       const providerSelect = el('providerSelect');
       const selectedProvider = providerSelect.value;
       providerSelect.replaceChildren();
       providerSelect.appendChild(option('', ''));
       state.providers.forEach((provider) => providerSelect.appendChild(option(provider.id, provider.display_name)));
-      if (selectedProvider) providerSelect.value = selectedProvider;
+      if (selectedProvider && state.providers.some((provider) => provider.id === selectedProvider)) {
+        providerSelect.value = selectedProvider;
+      } else if (state.providers.length) {
+        providerSelect.value = state.providers[0].id;
+      }
+
+      const runningCount = runs.filter((run) => isActiveRun(run)).length;
+      el('health').innerHTML = `
+        <span class="stat"><strong>${health.repos}</strong> ${plural(health.repos, 'repo')}</span>
+        <span class="stat"><strong>${health.jobs}</strong> ${plural(health.jobs, 'job')}</span>
+        <span class="stat running"><strong>${runningCount}</strong> running</span>
+        <span class="stat-divider" aria-hidden="true"></span>
+        <span class="stat">decisions <strong>${health.open_attention}</strong></span>
+      `;
 
       updateSelectionHint();
       renderJobs(jobs);
@@ -876,7 +1086,9 @@ CONTROL_CENTER_HTML = """<!doctype html>
     function updateSelectionHint() {
       const repo = state.repos.find((r) => String(r.id) === el('repoSelect').value);
       const provider = state.providers.find((p) => p.id === el('providerSelect').value);
-      el('selectionHint').textContent = [repo && repo.name, provider && provider.display_name].filter(Boolean).join(' | ');
+      el('headerRepo').textContent = repo ? `/ ${repo.name}` : '/ no repo';
+      el('commandMeta').textContent = [repo && repo.name, provider && provider.id].filter(Boolean).join(' · ');
+      el('selectionHint').textContent = 'live';
     }
 
     function statusClass(status) {
@@ -915,6 +1127,33 @@ CONTROL_CENTER_HTML = """<!doctype html>
       return `${Math.floor(delta / day)}d ago`;
     }
 
+    function isActiveRun(run) {
+      return ['running', 'starting', 'blocked', 'stale', 'queued'].includes(run.status);
+    }
+
+    function shortId(id) {
+      const value = String(id || '');
+      return value.slice(-7) || value;
+    }
+
+    function titleCase(text) {
+      return String(text || '').split(' ').filter(Boolean).map((word) => {
+        if (/^[A-Z0-9]{2,}$/.test(word)) return word;
+        if (/^\\d/.test(word)) return word;
+        return word.charAt(0).toUpperCase() + word.slice(1);
+      }).join(' ');
+    }
+
+    function cleanTitle(text, fallback = 'Untitled') {
+      let value = String(text || '').replace(/\s+/g, ' ').trim();
+      value = value.replace(/^(build|create|make|implement|add)\s+/i, '');
+      value = value.replace(/^(a|an|the)\s+/i, '');
+      value = value.replace(/\b(for something|using numpy for something|it should.*|should.*)$/i, '');
+      value = value.replace(/\b(something dumb like|for something dumb like)\b/i, '');
+      const words = value.trim().split(' ').filter(Boolean).slice(0, 5);
+      return titleCase(words.join(' ') || fallback);
+    }
+
     function renderList(id, rows, map, extraClass = '') {
       const root = el(id);
       root.replaceChildren();
@@ -942,11 +1181,11 @@ CONTROL_CENTER_HTML = """<!doctype html>
       if (!jobs.length) return root.appendChild(emptyNode('No active jobs'));
       jobs.forEach((job) => {
         const node = document.createElement('div');
-        node.className = 'item';
+        node.className = `item ${statusClass(job.status)}`;
+        node.title = job.objective || job.title || '';
         node.innerHTML = `
-          <strong>${escapeHtml(job.title)}</strong>
-          <div class="meta-line">${token(job.status)} <span>${escapeHtml(job.repo_name || '-')}</span></div>
-          <span class="meta-code">${escapeHtml(job.id)}</span>
+          <strong>${escapeHtml(cleanTitle(job.title))}</strong>
+          <div class="meta-line">${token(job.status)} <span class="meta-code">${escapeHtml(shortId(job.id))}</span></div>
         `;
         root.appendChild(node);
       });
@@ -984,7 +1223,7 @@ CONTROL_CENTER_HTML = """<!doctype html>
     function eventNode(event) {
       if (event.grouped) {
         const node = document.createElement('details');
-        node.className = 'item';
+        node.className = 'event-row';
         node.innerHTML = `
           <summary>
             <strong>${escapeHtml(event.title)}</strong>
@@ -998,7 +1237,7 @@ CONTROL_CENTER_HTML = """<!doctype html>
         return node;
       }
       const node = document.createElement('div');
-      node.className = 'item';
+      node.className = 'event-row';
       const severity = event.severity || 'info';
       const badge = severity === 'info' ? '' : token(severity);
       node.innerHTML = `
@@ -1060,16 +1299,19 @@ CONTROL_CENTER_HTML = """<!doctype html>
     function renderRuns(runs) {
       const root = el('runs');
       root.replaceChildren();
-      const active = runs.filter((run) => ['running', 'starting', 'blocked', 'stale', 'queued'].includes(run.status));
+      const active = runs.filter((run) => isActiveRun(run));
       if (!active.length) return root.appendChild(emptyNode('No active runs'));
       active.slice(0, 8).forEach((run) => {
         const node = document.createElement('div');
-        node.className = 'item';
+        const runClass = run.needs_attention ? 'waiting needs-attention' : statusClass(run.status);
+        node.className = `item ${runClass}`;
         node.innerHTML = `
-          <strong>${escapeHtml(run.task_name || run.task_id)}</strong>
+          <strong>${escapeHtml(cleanTitle(run.task_name || run.task_id, 'Run'))}${run.phase ? ` (${escapeHtml(run.phase)})` : ''}</strong>
           <div class="meta-line">${token(run.status)} <span>${escapeHtml(run.provider_id)}</span> <span>${escapeHtml(run.phase || '-')}</span></div>
-          <span class="meta-code">${escapeHtml(run.id)}</span>
+          <span class="meta-code">${escapeHtml(shortId(run.id))}</span>
+          ${run.needs_attention ? `<div class="attention-reason">${escapeHtml(run.attention_reason || 'Waiting for input')}</div>` : ''}
           <div class="run-actions">
+            ${run.needs_attention ? `<button class="primary" type="button" data-enter-run="${escapeHtml(run.id)}">Run command</button>` : ''}
             <button class="secondary" type="button" data-focus-run="${escapeHtml(run.id)}">Focus</button>
             <button class="danger" type="button" data-stop-run="${escapeHtml(run.id)}">Stop</button>
           </div>
@@ -1166,8 +1408,19 @@ CONTROL_CENTER_HTML = """<!doctype html>
       }
     }
 
+    async function enterRun(runId) {
+      if (!runId) return;
+      showError('commandError');
+      try {
+        await api(`/api/runs/${encodeURIComponent(runId)}/send-enter`, { method: 'POST', body: '{}' });
+        bubble(`Sent Enter to run: ${runId}`);
+        await refreshAll();
+      } catch (err) {
+        showError('commandError', err.message);
+      }
+    }
+
     el('registerRepo').addEventListener('click', registerRepo);
-    el('refresh').addEventListener('click', refreshAll);
     el('scheduleNow').addEventListener('click', scheduleNow);
     el('suggestCommand').addEventListener('click', () => {
       el('message').value = 'Build a frontend control panel for simulation runs';
@@ -1176,8 +1429,10 @@ CONTROL_CENTER_HTML = """<!doctype html>
     el('runs').addEventListener('click', (event) => {
       const stopId = event.target.dataset && event.target.dataset.stopRun;
       const focusId = event.target.dataset && event.target.dataset.focusRun;
+      const enterId = event.target.dataset && event.target.dataset.enterRun;
       if (stopId) stopRun(stopId);
       if (focusId) focusRun(focusId);
+      if (enterId) enterRun(enterId);
     });
     el('repoSelect').addEventListener('change', updateSelectionHint);
     el('providerSelect').addEventListener('change', updateSelectionHint);
