@@ -15,10 +15,10 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .backends import WorkerHandle
 from . import attention, budget, db, dispatcher, jobs, queue, scheduler
 from .config import load_config
 from .paths import Paths, resolve_paths
-from .zellij import Zellij
 
 
 def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -193,7 +193,7 @@ def create_app(*, paths: Paths | None = None, db_path: Path | None = None) -> Fa
             provider_id=provider_id,
             prompt_text=message,
         )
-        launch = dispatcher.make_scheduler_launch(Zellij(dry_run=body.dry_run), body.dry_run)
+        launch = dispatcher.make_scheduler_launch(dry_run=body.dry_run)
         decision = (
             scheduler.tick(conn, config, launch=launch, budget_policy=budget.policy)
             if body.dispatch
@@ -278,7 +278,7 @@ def create_app(*, paths: Paths | None = None, db_path: Path | None = None) -> Fa
         conn: sqlite3.Connection = Depends(conn_dep),
         config=Depends(config_dep),
     ) -> dict[str, Any]:
-        launch = dispatcher.make_scheduler_launch(Zellij(), False)
+        launch = dispatcher.make_scheduler_launch(dry_run=False)
         decision = scheduler.tick(conn, config, launch=launch, budget_policy=budget.policy)
         return {
             "dispatched": decision.dispatched,
@@ -351,12 +351,16 @@ def create_app(*, paths: Paths | None = None, db_path: Path | None = None) -> Fa
         return dict(db.get_task(conn, task_id))
 
     @app.post("/api/runs/{run_id}/stop")
-    def stop_run(run_id: str, conn: sqlite3.Connection = Depends(conn_dep)) -> dict[str, Any]:
+    def stop_run(
+        run_id: str,
+        conn: sqlite3.Connection = Depends(conn_dep),
+        config=Depends(config_dep),
+    ) -> dict[str, Any]:
         run = db.find_task_run(conn, run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
-        if run["zellij_session"] and run["zellij_pane_id"]:
-            Zellij().close_pane(run["zellij_session"], run["zellij_pane_id"])
+        if run["provider_session_id"]:
+            dispatcher.backend_for_config(config).stop(_handle_for_run(run))
         db.set_task_run_status(conn, run_id, "failed")
         task = db.get_task(conn, run["task_id"])
         if task is not None:
@@ -373,18 +377,22 @@ def create_app(*, paths: Paths | None = None, db_path: Path | None = None) -> Fa
         return dict(db.find_task_run(conn, run_id))
 
     @app.post("/api/runs/{run_id}/send-enter")
-    def send_enter_to_run(run_id: str, conn: sqlite3.Connection = Depends(conn_dep)) -> dict[str, Any]:
+    def send_enter_to_run(
+        run_id: str,
+        conn: sqlite3.Connection = Depends(conn_dep),
+        config=Depends(config_dep),
+    ) -> dict[str, Any]:
         run = db.find_task_run(conn, run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
-        if not run["zellij_session"] or not run["zellij_pane_id"]:
-            raise HTTPException(status_code=409, detail="run has no terminal pane")
-        Zellij().send_enter(run["zellij_session"], run["zellij_pane_id"])
+        if not run["provider_session_id"]:
+            raise HTTPException(status_code=409, detail="run has no backend session")
+        dispatcher.backend_for_config(config).send(_handle_for_run(run), "")
         db.insert_event(
             conn,
             event_type="task_run_input_sent",
             severity="info",
-            message=f"sent Enter to {run_id}",
+            message=f"sent input to {run_id}",
             task_id=run["task_id"],
             task_run_id=run_id,
             provider_id=run["provider_id"],
@@ -394,21 +402,22 @@ def create_app(*, paths: Paths | None = None, db_path: Path | None = None) -> Fa
         return updated
 
     @app.post("/api/runs/{run_id}/focus-terminal")
-    def focus_terminal(run_id: str, conn: sqlite3.Connection = Depends(conn_dep)) -> dict[str, Any]:
+    def focus_terminal(
+        run_id: str,
+        conn: sqlite3.Connection = Depends(conn_dep),
+        config=Depends(config_dep),
+    ) -> dict[str, Any]:
         run = db.find_task_run(conn, run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
-        if not run["zellij_session"] or not run["zellij_pane_id"]:
-            raise HTTPException(status_code=409, detail="run has no terminal pane")
-        focused = Zellij().focus_pane(run["zellij_session"], run["zellij_pane_id"])
-        if not focused:
-            raise HTTPException(status_code=502, detail="zellij did not accept the focus command")
+        if not run["provider_session_id"]:
+            raise HTTPException(status_code=409, detail="run has no backend session")
+        command = dispatcher.backend_for_config(config).attach_command(_handle_for_run(run))
         return {
-            "focused": True,
+            "focused": False,
             "run_id": run_id,
-            "session": run["zellij_session"],
-            "pane_id": run["zellij_pane_id"],
-            "attach_command": f"zellij attach {run['zellij_session']}",
+            "backend_session_id": run["provider_session_id"],
+            "attach_command": " ".join(command),
         }
 
     return app
@@ -461,34 +470,16 @@ def _feature_name_from_message(message: str) -> str:
     return " ".join(words[:5]) or "new task"
 
 
+def _handle_for_run(run: sqlite3.Row) -> WorkerHandle:
+    return WorkerHandle(
+        backend_id=run["provider_session_id"],
+        title=run["provider_session_name"] or run["provider_session_id"],
+    )
+
+
 def _augment_run_for_ui(run: dict[str, Any]) -> dict[str, Any]:
     run["needs_attention"] = False
     run["attention_reason"] = None
-    if run.get("status") not in {"running", "starting", "blocked", "stale", "queued"}:
-        return run
-    session = run.get("zellij_session")
-    pane_id = run.get("zellij_pane_id")
-    if not session or not pane_id:
-        return run
-
-    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(pane_id))
-    dump_path = Path("/tmp") / f"archon-pane-{safe_id}.txt"
-    try:
-        dump_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-    Zellij().dump_screen(str(session), str(pane_id), str(dump_path))
-    try:
-        screen = dump_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return run
-
-    if "Waiting to run:" in screen and "<ENTER> run" in screen:
-        run["needs_attention"] = True
-        run["attention_reason"] = "Waiting for command approval in the terminal"
-    elif "Please run /login" in screen or "Not logged in" in screen:
-        run["needs_attention"] = True
-        run["attention_reason"] = "Provider is asking for login"
     return run
 
 

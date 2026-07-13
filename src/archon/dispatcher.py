@@ -1,25 +1,17 @@
 """Task dispatch: turn a `review-pr`/`feature` request into task runs.
 
 The dispatcher is the seam between Archon's state (DB/config) and the outside
-world (Git worktrees, Zellij panes, provider CLIs). It owns the "one task run =
-one provider = one worktree = one branch/pane" invariant.
+world (worktrees, execution backends, provider CLIs). It owns the "one task run =
+one provider = one worktree = one branch/session" invariant.
 """
 
 from __future__ import annotations
 
-import os
-import shlex
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Interactive CLIs (Claude/Copilot) need their TUI to finish booting before we
-# paste, and a beat between the paste and Enter or the submit is swallowed while
-# the paste is still rendering. Tunable via env for slow machines.
-PANE_BOOT_DELAY = float(os.environ.get("ARCHON_PANE_BOOT_DELAY", "3.5"))
-PANE_ENTER_DELAY = float(os.environ.get("ARCHON_PANE_ENTER_DELAY", "0.8"))
-
 from . import agents, db, github, handoff, jobs, prompts
+from .backends import AgentDeckBackend, ExecutionBackend, LocalBackend, WorkerSpec
 from .config import Config
 from .git_worktree import (
     WorktreeInfo,
@@ -32,7 +24,6 @@ from .models import Repo, Task, TaskRun
 from .providers.base import ProviderLaunch
 from .providers.registry import get_provider
 from .util import is_dry_run, new_task_id, run_id_for, sanitize_slug
-from .zellij import Zellij
 
 
 class DispatchError(RuntimeError):
@@ -60,10 +51,10 @@ def session_name_for(repo_root_path: Path) -> str:
 
 
 def cockpit_session(config: Config | None, repo_root_path: Path) -> str:
-    """The Zellij session a repo's agents belong to.
+    """Legacy session label stored with a repo.
 
-    With a shared command center (default), every repo lands in one session so
-    you watch all agents on a single screen; otherwise each repo gets its own.
+    Older databases and UI views keep this column. Agent Deck now owns actual
+    terminal sessions.
     """
     if config and config.command_center.shared:
         return config.command_center.session
@@ -91,52 +82,57 @@ def register_repo(conn, ctx: RepoContext) -> RepoContext:
     return ctx
 
 
-def build_pane_command(launch: ProviderLaunch) -> list[str]:
-    """Wrap a provider launch (argv + env) into a single `bash -lc` command so
-    the ARCHON_* environment is present inside the Zellij pane."""
-    exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in launch.env.items())
-    inner = " ".join(shlex.quote(a) for a in launch.argv)
-    # Archon itself may be launched from another agent runtime. Do not leak that
-    # runtime's CI/sandbox flags into provider panes; native provider CLIs should
-    # see the user's normal auth/config environment instead.
-    unsets = "unset CODEX_CI CODEX_SANDBOX_NETWORK_DISABLED CODEX_THREAD_ID CODEX_MANAGED_BY_NPM CODEX_MANAGED_PACKAGE_ROOT"
-    script = f"{unsets}; {exports} exec {inner}" if exports else f"{unsets}; exec {inner}"
-    return ["bash", "-lc", script]
+def backend_for_config(config: Config, *, dry_run: bool = False) -> ExecutionBackend:
+    if dry_run or config.backend.kind == "local":
+        return LocalBackend(dry_run=dry_run)
+    return AgentDeckBackend(binary=config.backend.agentdeck.command)
+
+
+def _worker_spec_from_launch(
+    ctx: RepoContext,
+    run: TaskRun,
+    launch: ProviderLaunch,
+    *,
+    prompt: str,
+) -> WorkerSpec:
+    title = run.zellij_pane_name or launch.pane_name or f"{run.provider_id}-{run.id}"
+    return WorkerSpec(
+        title=title,
+        repo_path=str(launch.cwd),
+        branch=run.branch or title,
+        tool=run.provider_id.removeprefix("custom:"),
+        model=run.model,
+        prompt=prompt,
+        # Dispatcher still creates the worktree in M1; agent-deck gets that path
+        # as the session path. Full worktree ownership moves in a later slice.
+        use_worktree=False,
+        parent_id=None,
+        command=launch.argv,
+        cwd=str(launch.cwd),
+        env=launch.env,
+    )
 
 
 def _launch_run(
     conn,
-    zellij: Zellij,
+    backend: ExecutionBackend,
     ctx: RepoContext,
     run: TaskRun,
     launch: ProviderLaunch,
     *,
     dry_run: bool,
 ) -> None:
-    """Open the pane, record the pane id, inject the prompt, mark running."""
-    # Ensure the cockpit session exists so dispatching works without a prior
-    # `archon up` (idempotent no-op if it already exists).
-    zellij.attach_or_create_background(ctx.session)
-    pane_command = build_pane_command(launch)
-    pane_id = zellij.new_pane(
-        session=ctx.session,
-        name=run.zellij_pane_name or f"{run.provider_id}-run",
-        cwd=str(launch.cwd),
-        command=pane_command,
+    """Launch through the configured backend, record the handle, mark running."""
+    prompt = launch.prompt or ""
+    handle = backend.launch(_worker_spec_from_launch(ctx, run, launch, prompt=prompt))
+    run.provider_session_id = handle.backend_id
+    run.provider_session_name = handle.title
+    db.update_task_run(
+        conn,
+        run.id,
+        provider_session_id=handle.backend_id,
+        provider_session_name=handle.title,
     )
-    if pane_id:
-        run.zellij_pane_id = pane_id
-        db.update_task_run(conn, run.id, zellij_pane_id=pane_id)
-
-    if launch.expects_prompt_paste and launch.prompt and pane_id:
-        # Give the provider's TUI time to boot before pasting, then a beat before
-        # Enter so the submit isn't swallowed while the paste is still rendering.
-        if not dry_run:
-            time.sleep(PANE_BOOT_DELAY)
-        zellij.paste(ctx.session, pane_id, launch.prompt)
-        if not dry_run:
-            time.sleep(PANE_ENTER_DELAY)
-        zellij.send_enter(ctx.session, pane_id)
 
     db.set_task_run_status(conn, run.id, "running")
     run.status = "running"
@@ -144,7 +140,7 @@ def _launch_run(
         conn,
         event_type="task_run_launched",
         severity="info",
-        message=f"launched {run.provider_id} in pane {pane_id or '(pending)'}",
+        message=f"launched {run.provider_id} as {handle.title} ({handle.backend_id})",
         task_id=run.task_id,
         task_run_id=run.id,
         provider_id=run.provider_id,
@@ -160,11 +156,11 @@ def start_review(
     provider_ids: list[str],
     base: str | None = None,
     dry_run: bool | None = None,
-    zellij: Zellij | None = None,
+    backend: ExecutionBackend | None = None,
 ) -> DispatchResult:
     """Create a PR-review task with one read-only worktree/run per provider."""
     dry = is_dry_run(dry_run)
-    zellij = zellij or Zellij(dry_run=dry)
+    backend = backend or backend_for_config(config, dry_run=dry)
     base = base or default_base_branch(ctx.root)
 
     task = Task(
@@ -234,7 +230,7 @@ def start_review(
         launch = provider.worker_launch(run, prompt, purpose="review")
         result.launches[pid] = launch
         result.runs.append(run)
-        _launch_run(conn, zellij, ctx, run, launch, dry_run=dry)
+        _launch_run(conn, backend, ctx, run, launch, dry_run=dry)
 
     return result
 
@@ -251,11 +247,11 @@ def start_feature(
     prompt_text: str | None = None,
     variants: bool = False,
     dry_run: bool | None = None,
-    zellij: Zellij | None = None,
+    backend: ExecutionBackend | None = None,
 ) -> DispatchResult:
     """Create a feature task. One writer by default; `variants` for multiple."""
     dry = is_dry_run(dry_run)
-    zellij = zellij or Zellij(dry_run=dry)
+    backend = backend or backend_for_config(config, dry_run=dry)
     base = base or default_base_branch(ctx.root)
 
     if len(provider_ids) > 1 and not variants:
@@ -339,7 +335,7 @@ def start_feature(
         launch = provider.worker_launch(run, prompt, purpose="feature")
         result.launches[pid] = launch
         result.runs.append(run)
-        _launch_run(conn, zellij, ctx, run, launch, dry_run=dry)
+        _launch_run(conn, backend, ctx, run, launch, dry_run=dry)
 
     return result
 
@@ -350,7 +346,13 @@ def start_feature(
 # --------------------------------------------------------------------------- #
 
 # phase -> (codex sandbox purpose, worktree write intent)
-_PHASE_PURPOSE = {"plan": "review", "review": "review", "execute": "feature", "test": "feature"}
+_PHASE_PURPOSE = {
+    "plan": "review",
+    "review": "review",
+    "execute": "feature",
+    "test": "feature",
+    "docs": "feature",
+}
 
 
 def repo_context_from_task(conn, task_row) -> RepoContext:
@@ -389,13 +391,15 @@ def _phase_prompt(phase, ctx, provider, wt, feature_name, task_prompt) -> str:
             feature_name=feature_name, repo_name=ctx.name, provider_name=provider.display_name,
             worktree_path=str(wt.path), branch=wt.branch,
         )
+    if phase == "docs":
+        return task_prompt
     return prompts.feature_prompt(
         feature_name=feature_name, repo_name=ctx.name, provider_name=provider.display_name,
         worktree_path=str(wt.path), branch=wt.branch, feature_description=task_prompt,
     )
 
 
-def launch_task(conn, config: Config, task_row, *, zellij: Zellij | None = None,
+def launch_task(conn, config: Config, task_row, *, backend: ExecutionBackend | None = None,
                 dry_run: bool | None = None) -> TaskRun:
     """Create and launch one run for a queued task (the scheduler's launch fn).
 
@@ -403,7 +407,7 @@ def launch_task(conn, config: Config, task_row, *, zellij: Zellij | None = None,
     review/test see the implemented change. The provider is model-tiered by phase.
     """
     dry = is_dry_run(dry_run)
-    zellij = zellij or Zellij(dry_run=dry)
+    backend = backend or backend_for_config(config, dry_run=dry)
     ctx = repo_context_from_task(conn, task_row)
     provider_id = task_row["provider_id"] or (config.enabled_provider_ids() or ["claude"])[0]
     provider = get_provider(provider_id, config)
@@ -418,6 +422,7 @@ def launch_task(conn, config: Config, task_row, *, zellij: Zellij | None = None,
         provider_id=provider_id,
         status="starting",
         phase=phase,
+        model=task_row["model"] if "model" in task_row.keys() else None,
         branch=wt.branch,
         base_branch=wt.base_branch,
         worktree_path=str(wt.path),
@@ -445,14 +450,17 @@ def launch_task(conn, config: Config, task_row, *, zellij: Zellij | None = None,
     launch = provider.worker_launch(run, prompt, purpose=_PHASE_PURPOSE.get(phase, "feature"))
     if run.model:
         db.update_task_run(conn, run.id, model=run.model)
-    _launch_run(conn, zellij, ctx, run, launch, dry_run=dry)
+    _launch_run(conn, backend, ctx, run, launch, dry_run=dry)
     return run
 
 
-def make_scheduler_launch(zellij: Zellij | None = None, dry_run: bool | None = None):
+def make_scheduler_launch(
+    dry_run: bool | None = None,
+    backend: ExecutionBackend | None = None,
+):
     """Return a ``launch(conn, config, task_row)`` closure for ``scheduler.tick``."""
     def _launch(conn, config, task_row) -> None:
-        launch_task(conn, config, task_row, zellij=zellij, dry_run=dry_run)
+        launch_task(conn, config, task_row, backend=backend, dry_run=dry_run)
     return _launch
 
 

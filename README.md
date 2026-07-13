@@ -5,14 +5,14 @@
 <h1 align="center">Archon</h1>
 
 <p align="center">
-  <strong>A Zellij-native command center for orchestrating parallel AI coding agents.</strong><br/>
-  Run Claude Code, OpenAI Codex, and GitHub Copilot as controlled, observable workers — from one cockpit.
+  <strong>An orchestration brain for AI coding agents.</strong><br/>
+  Tell Archon the outcome; it plans the work, routes workers through Agent Deck, and surfaces approval decisions.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-183%20passing-3fb950?style=flat-square&logo=pytest&logoColor=white" alt="Tests: 183 passing" />
+  <img src="https://img.shields.io/badge/tests-194%20passing-3fb950?style=flat-square&logo=pytest&logoColor=white" alt="Tests: 194 passing" />
   <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" />
-  <img src="https://img.shields.io/badge/cockpit-Zellij-22d3ee?style=flat-square" alt="Zellij" />
+  <img src="https://img.shields.io/badge/backend-Agent%20Deck-22d3ee?style=flat-square" alt="Agent Deck" />
   <img src="https://img.shields.io/badge/CLI-Typer%20%2B%20Rich-2b6cff?style=flat-square" alt="Built with Typer + Rich" />
   <img src="https://img.shields.io/badge/license-MIT-8b5cf6?style=flat-square" alt="MIT License" />
   <img src="https://img.shields.io/badge/status-MVP-a855f7?style=flat-square" alt="Status: MVP" />
@@ -28,7 +28,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
-  <a href="#browser-control-center">Control center</a> ·
+  <a href="#daily-use">Daily use</a> ·
   <a href="#example-workflows">Workflows</a> ·
   <a href="#the-pipeline">Pipeline</a> ·
   <a href="#commands">Commands</a> ·
@@ -41,18 +41,13 @@
 
 ## What is Archon?
 
-Running several AI coding CLIs in parallel is powerful and chaotic. You end up
-juggling terminal panes, `cd`-ing between worktrees, re-pasting prompts, and
-squinting to see which agent is blocked on a permission prompt or burning budget.
+Running several AI coding CLIs in parallel is powerful and chaotic. Archon is the
+planning and governance layer for that work: it turns a natural-language outcome
+into a validated task graph, applies routing and approval policy, then launches
+workers through [Agent Deck](https://github.com/asheshgoplani/agent-deck).
 
-**Archon turns [Zellij](https://zellij.dev) into a cockpit for that work.** You run
-one command; Archon picks the providers, creates isolated Git worktrees per task,
-launches the right CLI in the right pane, injects a high-quality prompt, and tracks
-every run's state, cost, model, and telemetry in one dashboard. You can operate it
-from the terminal dashboard or from the local browser control center.
-
-It is **provider-agnostic from day one** — Claude, Codex, and Copilot are just
-adapters, and custom CLIs plug in via config.
+Agent Deck owns terminal/session plumbing. Archon owns intent intake, planning,
+task dependencies, review/test policy, budget gates, and the attention inbox.
 
 One shared cockpit spans **every repo** — watch all your agents on one screen,
 no tab-switching:
@@ -80,7 +75,7 @@ only the view is unified.
 
 | Principle | What it means |
 |---|---|
-| Zellij is the cockpit, not the brain | Archon owns state, routing, budgets, and telemetry; Zellij owns panes and layout. |
+| Agent Deck is the execution backend | Archon owns state, routing, budgets, and policy; Agent Deck owns worker sessions. |
 | Provider-agnostic core | Claude / Codex / Copilot / custom CLIs are adapters. The dashboard shows normalized state. |
 | One run = one provider = one worktree = one branch | Two agents never fight in the same branch, and nothing casually edits `main`. |
 | Attention routing beats status display | A permission prompt turns the pane red, focuses it, and fires a desktop notification. |
@@ -90,9 +85,9 @@ only the view is unified.
 
 ## Features
 
-- **Provider setup wizard** — detects installed CLIs, best-effort auth checks, saves your choice.
-- **Local browser control center** — submit tasks in a chat-style command box, add repos,
-  schedule work, inspect active runs, focus panes, and stop runs without memorising CLI commands.
+- **Planner intake** — `archon do "..."` asks a planner model for a validated JSON plan.
+- **Plan preview + approval** — low/medium-risk plans can be approved with `--yes`; high-risk plans require a human.
+- **Agent Deck backend** — workers launch as Agent Deck sessions; attach with the command Archon prints.
 - **Task queue + idle worker pool** — enqueue work; the scheduler dispatches ready tasks to idle providers within concurrency limits.
 - **Dependency graph (DAG)** — every task chain is a graph; a task runs only when its dependencies are `done`.
 - **Model tiering** — a strong model plans, a cheaper model executes (per provider, configurable).
@@ -101,7 +96,7 @@ only the view is unified.
 - **Live Rich dashboard** — provider readiness, worker pool, and task-run telemetry, color-coded and sorted by urgency.
 - **Normalized telemetry** — statusline + hooks ingest cost, tokens, context %, and rate limits; permission prompts mark runs `blocked`.
 - **Transcript search** — full-text search across transcripts and logs (`archon search`, `archon touched`).
-- **Dry-run everything** — `--dry-run` (or `ARCHON_DRY_RUN=1`) prints the exact plan without touching Zellij, Git, or any provider.
+- **Dry-run everything** — `--dry-run` (or `ARCHON_DRY_RUN=1`) previews plans without touching Git or any provider.
 
 ---
 
@@ -170,10 +165,9 @@ wall of green checkmarks.
 
 ## Quick start
 
-**Requirements:** Python 3.11+, [Zellij](https://zellij.dev), `git`, and at least one
-provider CLI ([`claude`](https://docs.claude.com/claude-code),
-[`codex`](https://developers.openai.com/codex/cli), or
-[`copilot`](https://docs.github.com/copilot)).
+**Requirements:** Python 3.11+, `git`, [Agent Deck](https://github.com/asheshgoplani/agent-deck),
+and at least one worker CLI such as `claude` or `codex`. Real planning currently
+uses `claude -p --output-format json`; `--dry-run` uses a deterministic local planner.
 
 ```bash
 # 1. Install
@@ -185,42 +179,45 @@ uv pip install -e .
 # 2. Initialise config + database
 .venv/bin/archon init
 
-# 3. Pick your providers (interactive wizard)
-.venv/bin/archon setup
+# 3. Check Agent Deck is available
+agent-deck --version
 
-# 4. Start the local browser control center
-.venv/bin/archon web
-# open http://127.0.0.1:8716
+# 4. Preview a plan without side effects
+.venv/bin/archon do "add a hello endpoint" --repo /path/to/repo --dry-run --plan-only
+
+# 5. Approve and dispatch a low/medium-risk plan
+.venv/bin/archon do "add a hello endpoint" --repo /path/to/repo --yes
 ```
 
-> Try it safely first. Everything runs without side effects under
-> `ARCHON_DRY_RUN=1` — great for seeing the worktree/branch/launch plan before
-> Archon touches your machine.
+Use `--dry-run --yes` to exercise the full plan/enqueue/dispatch path against an
+in-memory database. It is the safest first command on a new machine.
 
 If you prefer an already-activated virtualenv, `archon ...` works the same as
 `.venv/bin/archon ...`.
 
 ---
 
-## Browser control center
+## Daily use
 
-The browser control center is the easiest way to drive Archon during normal use.
-It runs as a local FastAPI app and talks to the same SQLite database, scheduler,
-Git worktree manager, provider adapters, and Zellij runtime as the CLI.
+The primary v2 flow is command-first:
 
 ```bash
-cd ~/projects/archon
-.venv/bin/archon web --host 127.0.0.1 --port 8716
+archon do "fix the flaky checkout test" --repo ~/work/my-app --plan-only
+archon do "fix the flaky checkout test" --repo ~/work/my-app --yes
+archon status
+archon jobs show <job-id>
+archon focus <run-or-task>   # prints: agent-deck session attach <id>
+archon stop <run-or-task> --yes
 ```
 
-Open `http://127.0.0.1:8716`. From there:
+What happens on `archon do`:
 
-1. Add a repository from the collapsed **Workspace** section if it is not already listed.
-2. Select the repo and provider.
-3. Type a task in **Command** and press Enter or **Send**.
-4. Archon creates a planning job, creates a feature worktree from the repo's default branch,
-   and launches the provider pane in Zellij.
-5. Use **Schedule** to dispatch queued work, **Focus** to jump to a run's pane, and **Stop** to close a run.
+1. Archon sends your request, repo path, routing table, constraints, and recent jobs to the planner.
+2. The planner returns strict JSON matching `PlanProposal`.
+3. Archon validates policy: execute tasks need dependent review and test tasks; high-risk plans need approval.
+4. Approved plans become a job, tasks, and dependency edges in SQLite.
+5. The scheduler dispatches ready tasks through the configured backend.
+6. Agent Deck creates and manages the worker session.
 
 Repositories must already be Git repos. For a brand-new project:
 
@@ -231,32 +228,32 @@ git init
 git commit --allow-empty -m "chore: init"
 ```
 
-Then add `/home/taylo/projects/TestArchFE` in the control center.
+Then run `archon do ... --repo /home/taylo/projects/TestArchFE`.
 
-### Zellij notes
+### Configuration
 
-Provider panes are real Zellij panes. To watch them directly:
+Archon stores config in the normal XDG config location. The relevant v2 defaults are:
 
-```bash
-zellij attach archon
+```yaml
+backend:
+  kind: agentdeck
+  agentdeck:
+    command: agent-deck
+    tested_version: Agent Deck v1.9.73
+routing:
+  cheap:
+    tool: claude
+    model: haiku
+  standard:
+    tool: codex
+    model: gpt-5-codex
+  high:
+    tool: claude
+    model: opus
+policy:
+  auto_approve_low_risk: false
+  retry_limit_per_task: 2
 ```
-
-`archon web` can focus/stop panes when it can talk to the same active Zellij context.
-Some Zellij versions only allow `zellij action ...` against the current attached
-session, not an arbitrary named session from another shell. If **Focus** does not
-move your visible terminal, attach manually with `zellij attach archon` and select
-the run pane there.
-
-Claude Code may show a terminal approval prompt such as:
-
-```text
-Waiting to run: ...
-<ENTER> run, <ESC> drop to shell
-```
-
-That is Claude asking permission to run a command, not Archon failing to launch
-the agent. Focus the pane and press Enter to approve it. New Claude panes inherit
-your normal `~/.claude` login context.
 
 ---
 

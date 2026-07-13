@@ -18,7 +18,7 @@ TaskType = Literal["pr_review", "feature", "test", "security", "custom"]
 ProviderPolicy = Literal["single", "multi_review", "variants", "ask"]
 # A task's phase selects the provider model tier (plan/review = strong,
 # execute/test = cheaper) and drives the plan→execute→review→test chain.
-Phase = Literal["plan", "execute", "review", "test"]
+Phase = Literal["plan", "execute", "review", "test", "docs"]
 WorkerState = Literal["idle", "busy", "offline"]
 JobStatus = Literal[
     "intake", "planning", "awaiting_plan_approval", "running",
@@ -196,6 +196,8 @@ class Task:
     parent_task_id: str | None = None  # groups a feature's plan/execute/review/test
     provider_id: str | None = None     # assigned provider for scheduler auto-dispatch
     job_id: str | None = None          # product-level parent job
+    model_tier: str | None = None      # cheap | standard | high
+    model: str | None = None           # concrete backend model override
 
 
 @dataclass

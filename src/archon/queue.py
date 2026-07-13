@@ -27,6 +27,8 @@ def enqueue_task(
     provider_policy: str = "single",
     pr_number: int | None = None,
     job_id: str | None = None,
+    model_tier: str | None = None,
+    model: str | None = None,
     depends_on: list[str] | None = None,
 ) -> Task:
     """Insert a fresh ``queued`` task and wire up its dependencies.
@@ -48,6 +50,8 @@ def enqueue_task(
         parent_task_id=parent_task_id,
         provider_id=provider_id,
         job_id=job_id,
+        model_tier=model_tier,
+        model=model,
     )
     db.insert_task(conn, task)
     for dep_id in depends_on or []:

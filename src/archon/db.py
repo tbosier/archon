@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   parent_task_id TEXT,
   provider_id TEXT,
   job_id TEXT,
+  model_tier TEXT,
+  model TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   finished_at TEXT,
@@ -281,7 +283,8 @@ def connect_memory() -> sqlite3.Connection:
 # Columns added after 0.1.0; applied to pre-existing databases on connect.
 _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "tasks": [("phase", "TEXT NOT NULL DEFAULT 'execute'"), ("parent_task_id", "TEXT"),
-              ("provider_id", "TEXT"), ("job_id", "TEXT")],
+              ("provider_id", "TEXT"), ("job_id", "TEXT"), ("model_tier", "TEXT"),
+              ("model", "TEXT")],
     "task_runs": [("phase", "TEXT NOT NULL DEFAULT 'execute'"), ("model", "TEXT")],
     "events": [
         ("job_id", "TEXT"),
@@ -609,13 +612,14 @@ def insert_task(conn: sqlite3.Connection, task: Task) -> None:
         INSERT INTO tasks
           (id, repo_id, type, name, status, priority, pr_number, prompt,
            provider_policy, phase, parent_task_id, provider_id, job_id,
-           created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           model_tier, model, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             task.id, task.repo_id, task.type, task.name, task.status,
             task.priority, task.pr_number, task.prompt, task.provider_policy,
             task.phase, task.parent_task_id, task.provider_id, task.job_id,
+            task.model_tier, task.model,
             now, now,
         ),
     )

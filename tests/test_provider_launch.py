@@ -208,6 +208,14 @@ def test_codex_review_phase_uses_plan_tier_and_read_only():
     assert run.model == "gpt-5.5"
 
 
+def test_codex_respects_task_model_override():
+    provider = get_provider("codex", default_config())
+    run = make_run(provider_id="codex", phase="execute", model="gpt-5-codex")
+    launch = provider.worker_launch(run, "work", purpose="feature")
+    assert launch.argv[launch.argv.index("--model") + 1] == "gpt-5-codex"
+    assert run.model == "gpt-5-codex"
+
+
 def test_provider_without_models_keeps_original_argv():
     # Instances from known_providers() have .models = None.
     provider = next(p for p in known_providers() if p.id == "claude")

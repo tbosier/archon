@@ -66,7 +66,11 @@ class CodexProvider:
 
         sandbox = _READ_ONLY if purpose == "review" else _WORKSPACE_WRITE
         phase = getattr(task_run, "phase", None) or "execute"
-        tier = self.models.for_phase(phase) if self.models else ModelTier()
+        tier = (
+            ModelTier(model=task_run.model)
+            if task_run.model
+            else (self.models.for_phase(phase) if self.models else ModelTier())
+        )
         extra = phases.model_args(self.id, tier)
         if tier.model is not None:
             task_run.model = tier.model

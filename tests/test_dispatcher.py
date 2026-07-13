@@ -5,6 +5,7 @@ import subprocess
 import pytest
 
 from archon import db, dispatcher
+from archon.backends.local import LocalBackend
 from archon.config import default_config
 
 
@@ -95,14 +96,24 @@ def test_runs_persisted_and_marked_running(conn, cfg, ctx):
     dispatcher.start_review(conn, cfg, ctx=ctx, pr_number=7, provider_ids=["claude", "codex"], dry_run=True)
     rows = db.list_task_runs(conn)
     assert {r["status"] for r in rows} == {"running"}
+    assert {r["provider_session_id"] for r in rows}
 
 
-def test_build_pane_command_injects_archon_env(conn, cfg, ctx):
-    res = dispatcher.start_feature(
-        conn, cfg, ctx=ctx, feature_name="f", provider_ids=["claude"], dry_run=True
+def test_dispatcher_uses_injected_backend(conn, cfg, ctx):
+    backend = LocalBackend(dry_run=True)
+    dispatcher.start_feature(
+        conn,
+        cfg,
+        ctx=ctx,
+        feature_name="backend seam",
+        provider_ids=["codex"],
+        dry_run=True,
+        backend=backend,
     )
-    cmd = dispatcher.build_pane_command(res.launches["claude"])
-    assert cmd[:2] == ["bash", "-lc"]
-    assert "unset CODEX_CI CODEX_SANDBOX_NETWORK_DISABLED" in cmd[2]
-    assert "ARCHON_TASK_ID" in cmd[2]
-    assert "ARCHON_PROVIDER_ID" in cmd[2]
+    assert len(backend.launches) == 1
+    spec = backend.launches[0]
+    assert spec.tool == "codex"
+    assert spec.title == "codex-feature-backend-seam"
+    row = db.list_task_runs(conn)[0]
+    assert row["provider_session_id"] == "codex-feature-backend-seam"
+    assert row["provider_session_name"] == "codex-feature-backend-seam"
