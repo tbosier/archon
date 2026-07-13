@@ -180,6 +180,21 @@ def infer_task_run_id(conn, payload: dict, env: dict) -> str | None:
                 if row:
                     return row["id"]
 
+            # Worktree/cwd match: the worker runs in its worktree, so a hook's
+            # cwd identifies the run even when no ARCHON_* env was forwarded
+            # (e.g. the agent-deck backend). This is what lets project-settings
+            # hooks attribute events without relying on env injection.
+            cwd = _first(payload, "cwd", "working_directory") or env.get("ARCHON_WORKTREE") or env.get("PWD")
+            if cwd is not None:
+                row = conn.execute(
+                    "SELECT id FROM task_runs WHERE worktree_path=? "
+                    "AND status IN ('running','starting','blocked') "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (str(cwd),),
+                ).fetchone()
+                if row:
+                    return row["id"]
+
             task_id = env.get("ARCHON_TASK_ID")
             if task_id:
                 row = conn.execute(

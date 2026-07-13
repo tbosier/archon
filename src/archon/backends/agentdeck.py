@@ -7,6 +7,7 @@ single contract surface.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Sequence
@@ -26,7 +27,12 @@ class AgentDeckBackend:
     timeout: float = 60.0
 
     def launch(self, spec: WorkerSpec) -> WorkerHandle:
-        data = self._run_json(build_launch_argv(spec, binary=self.binary))
+        # Forward the worker env (CLAUDE_CONFIG_DIR, ARCHON_TASK_RUN_ID, ARCHON_HOME…)
+        # so the tmux session agent-deck spawns inherits it. Enforcement works
+        # without this (project settings.json is env-independent), but this is
+        # what lets the hook attribute events to the right run + DB.
+        env = {**os.environ, **spec.env} if spec.env else None
+        data = self._run_json(build_launch_argv(spec, binary=self.binary), env=env)
         return _handle_from_payload(data, fallback_title=spec.title)
 
     def send(self, handle: WorkerHandle, message: str) -> None:
@@ -68,11 +74,11 @@ class AgentDeckBackend:
         proc = self._run(["--version"])
         return proc.stdout.strip() or None
 
-    def _run_json(self, args: Sequence[str]) -> Any:
-        proc = self._run(args)
+    def _run_json(self, args: Sequence[str], *, env: dict | None = None) -> Any:
+        proc = self._run(args, env=env)
         return _loads(proc.stdout)
 
-    def _run(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    def _run(self, args: Sequence[str], *, env: dict | None = None) -> subprocess.CompletedProcess[str]:
         if shutil.which(self.binary) is None:
             raise AgentDeckError(f"{self.binary!r} is not installed")
         argv = [self.binary, *args]
@@ -83,6 +89,7 @@ class AgentDeckBackend:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                env=env,
             )
         except subprocess.CalledProcessError as exc:
             msg = (exc.stderr or exc.stdout or str(exc)).strip()

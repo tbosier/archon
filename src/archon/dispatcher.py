@@ -124,6 +124,15 @@ def _launch_run(
 ) -> None:
     """Launch through the configured backend, record the handle, mark running."""
     prompt = launch.prompt or ""
+    # Install Archon's policy hooks into the worktree BEFORE the worker boots, so
+    # PreToolUse is gated (hard-deny actually blocks) and Stop/SessionEnd drive
+    # completion. Best-effort: never let hook install break a launch.
+    if not dry_run and run.worktree_path:
+        try:
+            from . import worker_hooks
+            worker_hooks.install_for_provider(run.provider_id, run.worktree_path)
+        except Exception:
+            pass
     handle = backend.launch(_worker_spec_from_launch(ctx, run, launch, prompt=prompt))
     run.provider_session_id = handle.backend_id
     run.provider_session_name = handle.title

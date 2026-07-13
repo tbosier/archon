@@ -138,6 +138,48 @@ def test_idempotent_no_double_handoff(conn):
     assert len(review) == 1, f"handoff ran twice: {len(review)} review tasks"
 
 
+def test_missing_session_surfaced_not_assumed_done(conn):
+    from archon import db as _db
+    cfg, ctx, job, tasks = _seed(conn)
+    ex = tasks["execute"]
+    run = _running_run(conn, ex, session="sg")
+    backend = FakeBackend({"sg": WorkerStatus(state="missing", cost_usd=None, last_output_tail="")})
+
+    result = reconcile.reconcile_once(conn, cfg, backend=backend, launch=_dry_launch())
+
+    # NOT completed — surfaced as ambiguous instead.
+    assert ex.id not in result.completed
+    assert run.id in result.stale
+    assert _db.find_task_run(conn, run.id)["status"] == "stale"
+    items = _db.list_attention_items(conn, status="open")
+    assert any(i["kind"] == "worker_gone" for i in items)
+
+
+def test_idle_is_not_treated_as_completion(conn):
+    cfg, ctx, job, tasks = _seed(conn)
+    ex = tasks["execute"]
+    _running_run(conn, ex, session="si")
+    backend = FakeBackend({"si": WorkerStatus(state="idle", cost_usd=None, last_output_tail="")})
+
+    result = reconcile.reconcile_once(conn, cfg, backend=backend, launch=_dry_launch())
+
+    assert ex.id not in result.completed
+    assert db.get_task(conn, ex.id)["status"] != "done"
+    assert db.find_task_run(conn, "run-" + ex.id)["status"] == "running"
+
+
+def test_stale_run_recovers_when_session_returns(conn):
+    cfg, ctx, job, tasks = _seed(conn)
+    ex = tasks["execute"]
+    run = _running_run(conn, ex, session="sr")
+    db.set_task_run_status(conn, run.id, "stale")
+    backend = FakeBackend({"sr": WorkerStatus(state="running", cost_usd=None, last_output_tail="")})
+
+    reconcile.reconcile_once(conn, cfg, backend=backend, launch=_dry_launch())
+
+    assert db.find_task_run(conn, run.id)["status"] == "running"
+
+
 def test_backend_exception_is_safe(conn):
     cfg, ctx, job, tasks = _seed(conn)
     ex = tasks["execute"]

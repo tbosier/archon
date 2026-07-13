@@ -5,6 +5,9 @@
     "refreshInterval": 5
   },
   "hooks": {
+    "PreToolUse": [
+      { "matcher": ".*", "hooks": [{ "type": "command", "command": "archon hook PreToolUse" }] }
+    ],
     "PermissionRequest": [
       { "matcher": ".*", "hooks": [{ "type": "command", "command": "archon hook PermissionRequest" }] }
     ],

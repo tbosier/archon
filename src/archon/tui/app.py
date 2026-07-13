@@ -144,15 +144,21 @@ def _plan_renderable(proposal: PlanProposal) -> Text:
         body.append("Acceptance: ", style="bold")
         body.append("; ".join(proposal.acceptance_criteria) + "\n\n", style="")
     body.append("Tasks\n", style="bold")
+    total = 0.0
     for t in proposal.tasks:
         glyph, color, _ = health_of("queued")
         deps = f"  after {', '.join(t.depends_on)}" if t.depends_on else ""
-        cost = f"  ~${t.est_cost_usd:.2f}" if t.est_cost_usd is not None else ""
+        cost = f"  ~${t.est_cost_usd:.2f} est" if t.est_cost_usd is not None else ""
+        if t.est_cost_usd is not None:
+            total += t.est_cost_usd
         body.append(f"  {glyph} ", style=color)
         body.append(f"{t.phase:<7} ", style="bold")
         body.append(f"{t.tool}/{t.model_tier}", style=_ACCENT)
         body.append(f"{deps}{cost}\n", style="dim")
         body.append(f"      {t.title}\n", style="")
+    if total:
+        body.append(f"\n~${total:.2f} rough estimate", style="yellow")
+        body.append(" — heuristic, not billed cost; actual spend updates live as workers run.\n", style="dim")
     return body
 
 

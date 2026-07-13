@@ -262,6 +262,8 @@ def handle_hook(
         "task_run_id": run_id,
         "blocked": blocked,
         "decision": decision,
+        "reason": (verdict.reason if verdict is not None else None),
+        "matched_rule": (verdict.matched_rule if verdict is not None else None),
     }
 
 
@@ -273,22 +275,39 @@ _PRETOOLUSE_HOOKS = {"PreToolUse"}
 _DECISION_TO_PROVIDER = {"allow": "allow", "deny": "deny", "escalate": "ask"}
 
 
-def _emit_provider_decision(hook_name: str, summary: dict) -> None:
+def _emit_provider_decision(hook_name: str, summary: dict) -> int:
+    """Return the enforceable decision to the provider. Returns the exit code.
+
+    For Claude Code PreToolUse we both (a) print the modern JSON decision on
+    stdout and (b) for a DENY, exit 2 with the reason on stderr — the universal
+    "block this tool call" signal older Claude versions key off. Either path
+    stops the command from running; together they are version-robust.
+    """
     if (hook_name or "").strip() not in _PRETOOLUSE_HOOKS:
-        return
+        return 0
     permission = _DECISION_TO_PROVIDER.get(summary.get("decision") or "")
     if not permission:
-        return
+        return 0
+    reason = summary.get("reason") or "archon team-lead policy"
+    rule = summary.get("matched_rule")
+    detail = f"{reason} [{rule}]" if rule else reason
     try:
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": permission,
-                "permissionDecisionReason": "archon team-lead policy",
+                "permissionDecisionReason": detail,
             }
         }))
     except Exception:
         pass
+    if permission == "deny":
+        try:
+            print(f"Blocked by Archon policy: {detail}", file=sys.stderr)
+        except Exception:
+            pass
+        return 2
+    return 0
 
 
 def main(hook_name: str) -> None:
@@ -315,8 +334,8 @@ def main(hook_name: str) -> None:
             except Exception:
                 pass
 
-    _emit_provider_decision(hook_name, summary or {})
-    sys.exit(0)
+    code = _emit_provider_decision(hook_name, summary or {})
+    sys.exit(code)
 
 
 if __name__ == "__main__":

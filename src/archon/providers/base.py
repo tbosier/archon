@@ -8,6 +8,7 @@ registry and this Protocol.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
@@ -85,5 +86,12 @@ def archon_env(task_run: TaskRun) -> dict[str, str]:
         env["ARCHON_ZELLIJ_SESSION"] = task_run.zellij_session
     if task_run.zellij_pane_name:
         env["ARCHON_PANE_NAME"] = task_run.zellij_pane_name
+    # Propagate Archon's data/config home so the worker's `archon hook` writes to
+    # the SAME database the supervisor reads (matters when the user overrides
+    # these; otherwise both default to the standard XDG paths anyway).
+    for key in ("ARCHON_HOME", "ARCHON_CONFIG_HOME"):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
     env.update(task_run.env_extra)
     return env

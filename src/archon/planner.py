@@ -18,6 +18,24 @@ from .models import Task
 from .util import sanitize_slug
 
 
+# Rough, order-of-magnitude cost estimates by phase, in USD. These are NOT
+# billed cost — they are a heuristic used only to give the plan-preview a sense
+# of scale. Real spend is measured from the backend (WorkerStatus.cost_usd) and
+# synced onto task runs as work executes; the jobs tree / detail pane show that
+# actual figure. Anything from the LLM planner is likewise treated as unverified.
+ROUGH_PHASE_COST_USD: dict[str, float] = {
+    "plan": 0.30,
+    "docs": 0.15,
+    "execute": 0.75,
+    "review": 0.40,
+    "test": 0.20,
+}
+
+
+def rough_cost(phase: str) -> float:
+    return ROUGH_PHASE_COST_USD.get(phase, 0.30)
+
+
 class PlannedTask(BaseModel):
     key: str
     title: str
@@ -87,7 +105,7 @@ def heuristic_plan(message: str, *, repo_path: Path, config) -> PlanProposal:
                     model_tier="cheap",
                     prompt=f"Update documentation in {repo}: {message}",
                     risk="low",
-                    est_cost_usd=0.10,
+                    est_cost_usd=rough_cost("docs"),
                 )
             ],
             overall_risk="low",
@@ -111,7 +129,7 @@ def heuristic_plan(message: str, *, repo_path: Path, config) -> PlanProposal:
                 model_tier="standard",
                 prompt=f"Implement this request in {repo}: {message}",
                 risk="medium",
-                est_cost_usd=0.75,
+                est_cost_usd=rough_cost("execute"),
             ),
             PlannedTask(
                 key="review",
@@ -122,7 +140,7 @@ def heuristic_plan(message: str, *, repo_path: Path, config) -> PlanProposal:
                 prompt=f"Review the implementation for: {message}",
                 depends_on=["execute"],
                 risk="medium",
-                est_cost_usd=0.40,
+                est_cost_usd=rough_cost("review"),
             ),
             PlannedTask(
                 key="test",
@@ -133,7 +151,7 @@ def heuristic_plan(message: str, *, repo_path: Path, config) -> PlanProposal:
                 prompt=f"Run focused verification for: {message}",
                 depends_on=["review"],
                 risk="low",
-                est_cost_usd=0.20,
+                est_cost_usd=rough_cost("test"),
             ),
         ],
         overall_risk="medium",
@@ -198,7 +216,8 @@ def planner_prompt(message: str, *, repo_path: Path, config, recent_job_titles: 
         f"{json.dumps(PlanProposal.model_json_schema(), ensure_ascii=False)}\n\n"
         "Rules: prefer the smallest plan; 1-task docs plans are fine; every execute task needs "
         "a dependent review task assigned to a different tool or higher tier and a test task; "
-        "never plan push, merge, PR creation, or PR submission; if ambiguity changes the plan "
+        "never plan push, merge, PR creation, or PR submission; est_cost_usd is a rough "
+        "order-of-magnitude estimate only, not a commitment; if ambiguity changes the plan "
         "shape, set clarifying_question and return no tasks.\n\n"
         f"Input:\n{json.dumps(payload, ensure_ascii=False)}"
     )
@@ -216,11 +235,19 @@ def render_plan(plan: PlanProposal) -> str:
     if plan.acceptance_criteria:
         lines.append("Acceptance: " + "; ".join(plan.acceptance_criteria))
     lines.append("Tasks:")
+    total = 0.0
     for task in plan.tasks:
         deps = f" after {', '.join(task.depends_on)}" if task.depends_on else ""
-        cost = f" ~${task.est_cost_usd:.2f}" if task.est_cost_usd is not None else ""
+        cost = f" ~${task.est_cost_usd:.2f} est" if task.est_cost_usd is not None else ""
+        if task.est_cost_usd is not None:
+            total += task.est_cost_usd
         lines.append(
             f"  - {task.key}: {task.phase} · {task.tool}/{task.model_tier}{deps}{cost} · {task.title}"
+        )
+    if total:
+        lines.append(
+            f"Rough estimate ~${total:.2f} (heuristic, not billed cost — actual spend "
+            f"is measured as workers run)."
         )
     return "\n".join(lines)
 
