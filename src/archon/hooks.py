@@ -16,13 +16,49 @@ import json
 import os
 import sys
 
-from . import attention, db, notify
+from . import attention, db, notify, permissions
 from .paths import resolve_paths
 from .statusline import infer_task_run_id
 from .util import append_event_line, utc_now
 
-# Hooks that represent a human-approval gate: mark the run blocked.
-_PERMISSION_HOOKS = {"PermissionRequest", "PermissionPrompt", "PreToolUsePermission"}
+# Hooks that represent a tool-use / human-approval gate: run the policy engine.
+_PERMISSION_HOOKS = {
+    "PermissionRequest", "PermissionPrompt", "PreToolUsePermission", "PreToolUse",
+}
+# Hooks that signal an agent finished its turn / the session ended: mark the run
+# done so the reconcile loop advances the plan (execute -> review -> test).
+_COMPLETION_HOOKS = {"Stop", "SessionEnd"}
+
+
+def _extract_command(payload: dict) -> str | None:
+    """Best-effort pull of the shell command from a tool-use hook payload.
+
+    Covers the common Claude Code shapes; returns None if no command is found
+    (an unparseable request fails safe to ESCALATE downstream).
+    """
+    if not isinstance(payload, dict):
+        return None
+    for path in (
+        ("tool_input", "command"),
+        ("tool", "input", "command"),
+        ("input", "command"),
+        ("params", "command"),
+        ("toolInput", "command"),
+    ):
+        cur: object = payload
+        for key in path:
+            if isinstance(cur, dict) and key in cur:
+                cur = cur[key]
+            else:
+                cur = None
+                break
+        if isinstance(cur, str):
+            return cur
+    for key in ("command", "cmd", "bash_command"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            return value
+    return None
 
 
 def _load_payload(stdin_text: str) -> tuple[dict, bool]:
@@ -102,7 +138,9 @@ def handle_hook(
         except Exception:
             run_id = None
 
-    blocked = (hook_name or "").strip() in _PERMISSION_HOOKS
+    name = (hook_name or "").strip()
+    is_permission = name in _PERMISSION_HOOKS
+    is_completion = name in _COMPLETION_HOOKS
 
     message = None
     if isinstance(payload, dict):
@@ -111,6 +149,25 @@ def handle_hook(
         message = f"hook {hook_name}" if parsed_ok else f"hook {hook_name} (malformed payload)"
 
     raw_json = stdin_text if isinstance(stdin_text, str) else ""
+
+    # Team-lead policy verdict (pure) — computed up front so the event log and the
+    # return value carry the accurate blocked/decision, side effects applied below.
+    verdict = None
+    decision: str | None = None
+    label = str(message) if message is not None else hook_name
+    if is_permission:
+        command = _extract_command(payload)
+        worktree = None
+        if conn is not None and run_id:
+            try:
+                r = db.find_task_run(conn, run_id)
+                worktree = r["worktree_path"] if r is not None else None
+            except Exception:
+                worktree = None
+        verdict = permissions.evaluate_permission(command or "", worktree_path=worktree)
+        decision = verdict.decision.value
+        label = command or label
+    blocked = decision in ("deny", "escalate")
 
     # 1. DB event.
     if conn is not None:
@@ -149,34 +206,89 @@ def handle_hook(
         except Exception:
             pass
 
-    # 3. Permission prompts -> mark run blocked + route attention.
-    if blocked:
-        if conn is not None and run_id:
-            try:
-                db.set_task_run_status(conn, run_id, "blocked")
-                attention.open_permission_item(
-                    conn,
-                    task_run_id=run_id,
-                    title=str(message) if message is not None else f"{hook_name}",
-                    summary=f"Provider requested permission via {hook_name}.",
-                )
-            except Exception:
-                pass
+    # 3a. Completion signal -> mark the run done so reconcile advances the plan.
+    if is_completion and conn is not None and run_id:
         try:
-            notify.notify(
-                "Archon: permission needed",
-                str(message) if message is not None else f"{hook_name}",
-                urgency="critical",
-            )
+            db.set_task_run_status(conn, run_id, "done")
         except Exception:
             pass
+
+    # 3b. Apply the policy verdict's side effects.
+    if verdict is not None:
+        if verdict.decision is permissions.Decision.ALLOW:
+            # Auto-approve: never touch attention, never block. Record for audit.
+            if conn is not None:
+                try:
+                    db.insert_event(
+                        conn,
+                        event_type="permission.auto_approved",
+                        severity="info",
+                        message=label,
+                        task_id=task_id,
+                        task_run_id=run_id,
+                        provider_id=str(provider_id) if provider_id else None,
+                        summary=f"auto-approved [{verdict.matched_rule}]: {verdict.reason}",
+                    )
+                except Exception:
+                    pass
+        else:
+            # DENY or ESCALATE: block the run and route a human decision.
+            if conn is not None and run_id:
+                try:
+                    db.set_task_run_status(conn, run_id, "blocked")
+                    if verdict.decision is permissions.Decision.DENY:
+                        attention.open_permission_denied(
+                            conn, task_run_id=run_id,
+                            title=f"BLOCKED: {label}",
+                            summary=f"{verdict.reason} [{verdict.matched_rule}]",
+                        )
+                    else:
+                        attention.open_permission_item(
+                            conn, task_run_id=run_id,
+                            title=label,
+                            summary=f"Needs your approval (policy: escalate). via {hook_name}.",
+                        )
+                except Exception:
+                    pass
+            try:
+                title = "Archon: command blocked" if verdict.decision is permissions.Decision.DENY else "Archon: permission needed"
+                notify.notify(title, label, urgency="critical")
+            except Exception:
+                pass
 
     return {
         "hook": hook_name,
         "severity": severity,
         "task_run_id": run_id,
         "blocked": blocked,
+        "decision": decision,
     }
+
+
+# Claude Code PreToolUse honours a JSON decision on stdout. Our three policy
+# outcomes map straight onto its vocabulary: allow -> run it, deny -> refuse,
+# escalate -> "ask" (show the human the normal prompt). Format is Claude-Code
+# specific and version-sensitive; other providers ignore unexpected stdout.
+_PRETOOLUSE_HOOKS = {"PreToolUse"}
+_DECISION_TO_PROVIDER = {"allow": "allow", "deny": "deny", "escalate": "ask"}
+
+
+def _emit_provider_decision(hook_name: str, summary: dict) -> None:
+    if (hook_name or "").strip() not in _PRETOOLUSE_HOOKS:
+        return
+    permission = _DECISION_TO_PROVIDER.get(summary.get("decision") or "")
+    if not permission:
+        return
+    try:
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": permission,
+                "permissionDecisionReason": "archon team-lead policy",
+            }
+        }))
+    except Exception:
+        pass
 
 
 def main(hook_name: str) -> None:
@@ -187,14 +299,15 @@ def main(hook_name: str) -> None:
         stdin_text = ""
 
     conn = None
+    summary: dict = {}
     try:
         conn = db.connect()
-        handle_hook(hook_name, stdin_text, conn)
+        summary = handle_hook(hook_name, stdin_text, conn)
     except Exception:
         try:
-            handle_hook(hook_name, stdin_text, None)
+            summary = handle_hook(hook_name, stdin_text, None)
         except Exception:
-            pass
+            summary = {}
     finally:
         if conn is not None:
             try:
@@ -202,6 +315,7 @@ def main(hook_name: str) -> None:
             except Exception:
                 pass
 
+    _emit_provider_decision(hook_name, summary or {})
     sys.exit(0)
 
 

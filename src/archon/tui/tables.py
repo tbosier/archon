@@ -16,8 +16,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from . import db
-from .models import STATUS_COLORS, health_of, run_urgency
+from .. import db
+from ..models import STATUS_COLORS, health_of, run_urgency
 
 
 def _status_text(status: str) -> Text:

@@ -1,8 +1,8 @@
 """Archon command-line interface.
 
-`archon up` launches the cockpit; `archon review-pr` / `archon feature` dispatch
-work; `archon status` shows the dashboard. Every command that touches the outside
-world honours `--dry-run` (and the ``ARCHON_DRY_RUN`` env var).
+`archon do` plans and dispatches work; `archon status` shows the dashboard.
+Every command that touches the outside world honours `--dry-run` (and the
+``ARCHON_DRY_RUN`` env var).
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import Optional
 import typer
 from rich.console import Console
 
+from .backends import WorkerHandle
 from . import (
     attention,
     budget,
@@ -21,6 +22,8 @@ from . import (
     dispatcher,
     hooks,
     jobs,
+    planner,
+    policy,
     queue,
     scheduler,
     statusline,
@@ -31,16 +34,15 @@ from .config import Config, load_config, save_config
 from .models import Provider, Worker
 from .paths import resolve_paths
 from .provider_health import check_all
-from .provider_login import login_launch_for, login_pane_name
+from .provider_login import login_launch_for
 from .provider_wizard import run_provider_wizard
 from .providers.registry import get_provider, known_provider_ids, known_providers
 from .util import is_dry_run
-from .zellij import Zellij
 
 app = typer.Typer(
     add_completion=False,
-    no_args_is_help=True,
-    help="Archon — a Zellij-native command center for parallel AI coding agents.",
+    no_args_is_help=False,
+    help="Archon — an orchestration brain for parallel AI coding agents.",
 )
 providers_app = typer.Typer(no_args_is_help=True, help="Inspect and manage provider CLIs.")
 jobs_app = typer.Typer(no_args_is_help=True, help="Create and inspect control-center jobs.")
@@ -51,6 +53,23 @@ app.add_typer(attention_app, name="attention")
 
 console = Console()
 err = Console(stderr=True)
+
+
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
+    """Launch the interactive Textual cockpit when `archon` runs bare."""
+    if ctx.invoked_subcommand is not None:
+        return
+    _, conn, config = _open()
+    _sync_providers_to_db(conn, config)
+    repo_ctx = None
+    try:
+        repo_ctx = dispatcher.register_repo(conn, dispatcher.resolve_repo_context(None, config=config))
+    except Exception:
+        # Not inside a git repo — the app still shows the read-only dashboard.
+        pass
+    from . import tui as _tui
+    _tui.run_app(conn, config, repo_ctx)
 
 
 # --------------------------------------------------------------------------- #
@@ -205,7 +224,7 @@ def web(
 @app.command()
 def up(
     repo: Optional[Path] = typer.Option(None, help="Repository root."),
-    session: Optional[str] = typer.Option(None, help="Zellij session name."),
+    session: Optional[str] = typer.Option(None, help="Legacy session name stored with the repo."),
     provider: list[str] = typer.Option(None, "--provider", help="Enable a provider (repeatable)."),
     all_providers: bool = typer.Option(False, "--all-providers"),
     ask_providers: bool = typer.Option(False, "--ask-providers", help="Always show the selector."),
@@ -214,7 +233,7 @@ def up(
     spawn_on_task: bool = typer.Option(False, "--spawn-on-task"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
-    """Start (or attach to) the cockpit for a repository."""
+    """Compatibility alias: initialise repo/provider state and show status."""
     dry = is_dry_run(dry_run)
     paths, conn, config = _open(dry)
     ctx = dispatcher.resolve_repo_context(repo, session=session, config=config)
@@ -238,9 +257,6 @@ def up(
 
     _sync_providers_to_db(conn, config)
 
-    zellij = Zellij(dry_run=dry)
-    zellij.attach_or_create_background(ctx.session)
-
     launch_now = config.startup.provider_panes == "launch_now"
     if spawn_provider_panes:
         launch_now = True
@@ -248,12 +264,7 @@ def up(
         launch_now = False
 
     scope = "command center (shared)" if config.command_center.shared else "per-repo"
-    console.print(f"[cyan]archon up[/cyan]  repo={ctx.root}  session={ctx.session} [dim]({scope})[/dim]  dry_run={dry}")
-    # Open a persistent dashboard pane in the shared session so every repo's
-    # agents are visible on one screen.
-    if config.command_center.shared and not _dashboard_pane_exists(zellij, ctx.session):
-        zellij.new_pane(ctx.session, "archon-dashboard", str(ctx.root),
-                        ["bash", "-lc", "archon dashboard"])
+    console.print(f"[cyan]archon up[/cyan]  repo={ctx.root}  backend={config.backend.kind} [dim]({scope})[/dim]  dry_run={dry}")
     health_all = check_all(known_providers())
     for pid in config.enabled_provider_ids():
         health = health_all.get(pid)
@@ -267,9 +278,7 @@ def up(
                                       max_concurrency=per_provider))
         if health and health.auth_status == "needs_login":
             launch = login_launch_for(pid, config, repo=ctx.root)
-            zellij.new_pane(ctx.session, login_pane_name(pid), str(ctx.root),
-                            ["bash", "-lc", " ".join(launch.argv)])
-            console.print(f"  [yellow]{pid}: opened login pane[/yellow] ({login_pane_name(pid)})")
+            console.print(f"  [yellow]{pid}: login required[/yellow] — run: {' '.join(launch.argv)}")
         elif launch_now:
             console.print(f"  [green]{pid}: ready[/green] (idle worker)")
         else:
@@ -277,20 +286,7 @@ def up(
 
     from . import tui
     tui.show_once(conn, console)
-    console.print(
-        f"\n[dim]command center → attach with[/dim] [cyan]zellij attach {ctx.session}[/cyan]"
-        f" [dim]· dashboard pane runs[/dim] [cyan]archon dashboard[/cyan]"
-    )
-
-
-def _dashboard_pane_exists(zellij: Zellij, session: str) -> bool:
-    try:
-        return any(
-            "archon-dashboard" in (p.get("name") or p.get("title") or "")
-            for p in zellij.list_panes(session)
-        )
-    except Exception:
-        return False
+    console.print("\n[dim]v2 entrypoint:[/dim] [cyan]archon do \"your outcome\" --repo PATH[/cyan]")
 
 
 # --------------------------------------------------------------------------- #
@@ -354,16 +350,12 @@ def providers_login(
     repo: Optional[Path] = typer.Option(None),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
-    """Open a Zellij pane running the provider's native login command."""
+    """Print the provider's native login command."""
     dry = is_dry_run(dry_run)
     _, conn, config = _open(dry)
     launch = login_launch_for(provider_id, config, repo=repo or Path.cwd())
-    ctx = dispatcher.resolve_repo_context(repo, config=config)
-    zellij = Zellij(dry_run=dry)
-    zellij.attach_or_create_background(ctx.session)
-    zellij.new_pane(ctx.session, login_pane_name(provider_id), str(ctx.root),
-                    ["bash", "-lc", " ".join(launch.argv)])
-    console.print(f"[cyan]login pane opened for {provider_id}[/cyan] — complete the flow, then `archon providers refresh`")
+    console.print(f"[cyan]{provider_id} login command:[/cyan] {' '.join(launch.argv)}")
+    console.print("[dim]complete the provider login, then run `archon providers refresh`[/dim]")
 
 
 # --------------------------------------------------------------------------- #
@@ -480,6 +472,80 @@ def attention_resolve(
 # Tasks
 # --------------------------------------------------------------------------- #
 
+@app.command("do")
+def do_cmd(
+    message: str,
+    repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Repository root."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Approve and dispatch without prompting."),
+    plan_only: bool = typer.Option(False, "--plan-only", help="Only print the plan preview."),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """Plan a natural-language outcome, optionally approve it, then dispatch."""
+    dry = is_dry_run(dry_run)
+    _, conn, config = _open(dry)
+    ctx = dispatcher.register_repo(conn, dispatcher.resolve_repo_context(repo, config=config))
+
+    try:
+        if dry:
+            proposal = planner.heuristic_plan(message, repo_path=ctx.root, config=config)
+        else:
+            proposal = planner.plan_with_llm(
+                message,
+                repo_path=ctx.root,
+                config=config,
+                recent_job_titles=planner.recent_job_titles(conn, ctx.repo_id or 0),
+            )
+        policy.validate_plan(proposal, config)
+    except Exception as exc:
+        err.print(f"[red]planning failed:[/red] {exc}")
+        raise typer.Exit(1)
+
+    console.print(planner.render_plan(proposal))
+    if proposal.clarifying_question:
+        raise typer.Exit(0)
+    if plan_only:
+        return
+
+    needs_approval = policy.requires_approval(proposal, config, yes=yes)
+    if needs_approval:
+        if not sys.stdin.isatty():
+            if not dry:
+                job = jobs.create_job(
+                    conn,
+                    repo_id=ctx.repo_id or 0,
+                    title=proposal.title,
+                    objective=proposal.objective,
+                    constraints=proposal.constraints,
+                    acceptance_criteria=proposal.acceptance_criteria,
+                    status="awaiting_plan_approval",
+                    current_plan=proposal.model_dump(mode="json"),
+                )
+                attention.open_item(
+                    conn,
+                    kind="plan_approval",
+                    severity="warn" if proposal.overall_risk == "high" else "info",
+                    title=f"approve plan: {proposal.title}",
+                    summary=planner.render_plan(proposal),
+                    job_id=job.id,
+                    options=["approve", "reject", "edit"],
+                    recommended_option="approve" if proposal.overall_risk != "high" else "inspect",
+                )
+            raise typer.BadParameter("Plan requires approval. Re-run with --yes for low/medium risk or approve from attention.")
+        if not typer.confirm("Approve this plan and dispatch?"):
+            console.print("[yellow]plan discarded[/yellow]")
+            return
+
+    if proposal.overall_risk == "high" and yes and not sys.stdin.isatty():
+        raise typer.BadParameter("High-risk plans require interactive approval.")
+
+    job, tasks = planner.persist_plan(conn, config, ctx, proposal)
+    launch = dispatcher.make_scheduler_launch(dry_run=dry)
+    decision = scheduler.tick(conn, config, launch=launch, budget_policy=budget.policy)
+    tag = "[yellow](dry-run)[/yellow] " if dry else ""
+    console.print(f"{tag}[green]job[/green] {job.id}  tasks={len(tasks)}")
+    console.print(f"dispatched={decision.dispatched or '-'}  skipped={decision.skipped or '-'}")
+
+
 @app.command("review-pr")
 def review_pr(
     pr_number: int,
@@ -550,7 +616,7 @@ def feature(
     chain = dispatcher.enqueue_feature(
         conn, config, ctx, feature_name=name, provider_id=provider_ids[0], prompt_text=prompt
     )
-    launch = dispatcher.make_scheduler_launch(Zellij(dry_run=dry), dry)
+    launch = dispatcher.make_scheduler_launch(dry_run=dry)
     decision = scheduler.tick(conn, config, launch=launch, budget_policy=budget.policy)
 
     tag = "[yellow](dry-run)[/yellow] " if dry else ""
@@ -610,13 +676,17 @@ def tui(inside_zellij: bool = typer.Option(False, "--inside-zellij", hidden=True
 
 @app.command()
 def focus(selector: str) -> None:
-    """Focus the Zellij pane for a task/run selector."""
-    _, conn, _ = _open()
+    """Print the backend attach command for a task/run selector."""
+    _, conn, config = _open()
     row = _find_run(conn, selector)
-    if not row or not row["zellij_pane_id"]:
-        raise typer.BadParameter(f"No pane found for '{selector}'.")
-    Zellij().focus_pane(row["zellij_session"], row["zellij_pane_id"])
-    console.print(f"[cyan]focused[/cyan] {row['id']} → pane {row['zellij_pane_id']}")
+    if not row or not row["provider_session_id"]:
+        raise typer.BadParameter(f"No backend session found for '{selector}'.")
+    backend = dispatcher.backend_for_config(config)
+    handle = WorkerHandle(
+        backend_id=row["provider_session_id"],
+        title=row["provider_session_name"] or row["provider_session_id"],
+    )
+    console.print(" ".join(backend.attach_command(handle)))
 
 
 @app.command()
@@ -624,16 +694,21 @@ def stop(
     selector: str,
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
 ) -> None:
-    """Stop a task run (Ctrl-C its pane) after confirmation."""
-    _, conn, _ = _open()
+    """Stop a task run through the configured backend after confirmation."""
+    _, conn, config = _open()
     row = _find_run(conn, selector)
     if not row:
         raise typer.BadParameter(f"No task run found for '{selector}'.")
-    if not yes and not typer.confirm(f"Stop {row['id']} (pane {row['zellij_pane_id']})?"):
+    if not yes and not typer.confirm(f"Stop {row['id']} ({row['provider_session_id'] or 'no backend session'})?"):
         raise typer.Abort()
-    z = Zellij()
-    if row["zellij_pane_id"]:
-        z.close_pane(row["zellij_session"], row["zellij_pane_id"])
+    if row["provider_session_id"]:
+        backend = dispatcher.backend_for_config(config)
+        backend.stop(
+            WorkerHandle(
+                backend_id=row["provider_session_id"],
+                title=row["provider_session_name"] or row["provider_session_id"],
+            )
+        )
     db.set_task_run_status(conn, row["id"], "failed")
     console.print(f"[yellow]stopped[/yellow] {row['id']}")
 
@@ -719,7 +794,7 @@ def schedule(
     """Dispatch ready tasks, gated by concurrency and the budget policy."""
     dry = is_dry_run(dry_run)
     _, conn, config = _open(dry)
-    launch = dispatcher.make_scheduler_launch(Zellij(dry_run=dry), dry)
+    launch = dispatcher.make_scheduler_launch(dry_run=dry)
 
     def _one() -> None:
         d = scheduler.tick(conn, config, launch=launch, budget_policy=budget.policy)
@@ -758,7 +833,7 @@ def complete(
     for kind, t in (result.get("handoff") or {}).items():
         if t:
             console.print(f"  [cyan]handoff[/cyan] → {kind}: {t.id}")
-    launch = dispatcher.make_scheduler_launch(Zellij(dry_run=dry), dry)
+    launch = dispatcher.make_scheduler_launch(dry_run=dry)
     d = scheduler.tick(conn, config, launch=launch, budget_policy=budget.policy)
     if d.dispatched:
         console.print(f"  [dim]dispatched next:[/dim] {', '.join(d.dispatched)}")

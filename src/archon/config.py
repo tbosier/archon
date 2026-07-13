@@ -131,11 +131,45 @@ class BudgetConfig(BaseModel):
 class SchedulerConfig(BaseModel):
     """Task queue / idle-worker-pool controls."""
 
-    max_concurrency: int = 3               # global cap on simultaneously running runs
-    per_provider_concurrency: int = 1      # cap per provider (one writer per provider)
+    max_concurrency: int = 8               # global cap on simultaneously running runs
+    per_provider_concurrency: int = 4      # cap per provider (parallel agents per tool)
     auto_handoff: bool = True              # feature → review → test on completion
     plan_before_execute: bool = True       # features get a plan phase before executing
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
+
+
+class AgentDeckConfig(BaseModel):
+    tested_version: str = "Agent Deck v1.9.73"
+    command: str = "agent-deck"
+
+
+class BackendConfig(BaseModel):
+    kind: Literal["agentdeck", "local"] = "agentdeck"
+    agentdeck: AgentDeckConfig = Field(default_factory=AgentDeckConfig)
+
+
+class RoutingTarget(BaseModel):
+    tool: str
+    model: str | None = None
+
+
+class RoutingConfig(BaseModel):
+    cheap: RoutingTarget = Field(default_factory=lambda: RoutingTarget(tool="claude", model="haiku"))
+    standard: RoutingTarget = Field(default_factory=lambda: RoutingTarget(tool="codex", model="gpt-5-codex"))
+    high: RoutingTarget = Field(default_factory=lambda: RoutingTarget(tool="claude", model="opus"))
+    review_must_differ_from_execute: bool = True
+
+    def for_tier(self, tier: str) -> RoutingTarget:
+        if tier == "high":
+            return self.high
+        if tier == "standard":
+            return self.standard
+        return self.cheap
+
+
+class PolicyConfig(BaseModel):
+    auto_approve_low_risk: bool = False
+    retry_limit_per_task: int = 2
 
 
 class Config(BaseModel):
@@ -143,6 +177,9 @@ class Config(BaseModel):
     startup: StartupConfig = Field(default_factory=StartupConfig)
     command_center: CommandCenterConfig = Field(default_factory=CommandCenterConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    backend: BackendConfig = Field(default_factory=BackendConfig)
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     custom: list[CustomProviderConfig] = Field(default_factory=list)
 

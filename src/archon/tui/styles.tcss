@@ -1,0 +1,104 @@
+/* Archon TUI theme — dark, command-first, one accent (cyan). */
+
+Screen {
+    background: $background;
+    color: $text;
+}
+
+#topbar {
+    dock: top;
+    height: 1;
+    padding: 0 1;
+    background: $panel;
+    color: $accent;
+    text-style: bold;
+}
+
+#banner {
+    dock: top;
+    height: 1;
+    padding: 0 1;
+    background: $error 20%;
+    color: $error;
+    display: none;
+}
+
+#banner.visible {
+    display: block;
+}
+
+.section-title {
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+    text-style: bold;
+}
+
+#attention {
+    height: auto;
+    max-height: 8;
+    border-bottom: solid $panel-lighten-2;
+    background: $surface;
+}
+
+#attention > ListItem {
+    padding: 0 1;
+}
+
+#attention > ListItem.--highlight {
+    background: $accent 30%;
+}
+
+#body {
+    height: 1fr;
+}
+
+#jobs {
+    width: 45%;
+    border-right: solid $panel-lighten-2;
+    padding: 0 1;
+}
+
+#detail {
+    width: 1fr;
+    padding: 0 1;
+    background: $surface;
+}
+
+#command {
+    dock: bottom;
+    height: 3;
+    border: tall $accent;
+    background: $panel;
+}
+
+PlanModal {
+    align: center middle;
+}
+
+PlanModal > #plan-box {
+    width: 80%;
+    max-width: 110;
+    height: auto;
+    max-height: 80%;
+    border: thick $accent;
+    background: $panel;
+    padding: 1 2;
+}
+
+PlanModal #plan-hint {
+    color: $text-muted;
+    margin-top: 1;
+}
+
+AnswerModal {
+    align: center middle;
+}
+
+AnswerModal > #answer-box {
+    width: 70%;
+    height: auto;
+    border: thick $accent;
+    background: $panel;
+    padding: 1 2;
+}

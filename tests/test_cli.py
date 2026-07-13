@@ -82,6 +82,16 @@ def test_feature_single_dry_run(git_repo):
     assert "newButton4User" in result.stdout
 
 
+def test_do_dry_run_yes_dispatches_plan(git_repo):
+    runner.invoke(app, ["init"])
+    result = runner.invoke(app, [
+        "do", "add a hello endpoint", "--repo", str(git_repo), "--dry-run", "--yes",
+    ])
+    assert result.exit_code == 0
+    assert "Add A Hello Endpoint" in result.stdout
+    assert "dispatched=" in result.stdout
+
+
 def test_review_pr_ambiguous_provider_noninteractive_fails(git_repo):
     runner.invoke(app, ["init"])
     runner.invoke(app, ["providers", "enable", "claude", "codex"])
@@ -98,3 +108,18 @@ def test_statusline_tolerates_garbage():
 def test_hook_tolerates_garbage():
     result = runner.invoke(app, ["hook", "Notification"], input="{bad")
     assert result.exit_code == 0
+
+
+def test_bare_archon_launches_textual_app(monkeypatch):
+    """Bare `archon` (no subcommand) boots the interactive Textual cockpit."""
+    calls = {}
+
+    def fake_run_app(conn, config, ctx=None, **kwargs):
+        calls["conn"] = conn
+        calls["config"] = config
+        calls["ctx"] = ctx
+
+    monkeypatch.setattr("archon.tui.run_app", fake_run_app)
+    result = runner.invoke(app, [])
+    assert result.exit_code == 0, result.stdout
+    assert "conn" in calls and calls["config"] is not None

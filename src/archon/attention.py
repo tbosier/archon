@@ -121,6 +121,34 @@ def open_permission_item(
     )
 
 
+def open_permission_denied(
+    conn: sqlite3.Connection,
+    *,
+    task_run_id: str,
+    title: str,
+    summary: str | None = None,
+) -> AttentionItem:
+    """Open a hard-deny decision: the policy blocked a dangerous command.
+
+    Distinct from :func:`open_permission_item` (a routine escalation) — this one
+    requires an explicit human override and never auto-resolves.
+    """
+    ctx = _context_for_run(conn, task_run_id)
+    return open_item(
+        conn,
+        kind="permission_denied",
+        severity="critical",
+        title=title,
+        summary=summary,
+        job_id=ctx["job_id"],
+        agent_id=ctx["agent_id"],
+        task_id=ctx["task_id"],
+        task_run_id=task_run_id,
+        options=["override", "keep_blocked"],
+        recommended_option="keep_blocked",
+    )
+
+
 def resolve_item(
     conn: sqlite3.Connection,
     item_id: str,

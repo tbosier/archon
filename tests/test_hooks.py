@@ -61,11 +61,14 @@ def test_permission_request_blocks_run():
 
 
 def test_non_permission_hook_not_blocked():
+    # A neutral hook (not a permission gate, not a completion signal) neither
+    # blocks nor advances the run. (Stop/SessionEnd now intentionally mark the
+    # run done — see test_hooks_policy.test_stop_hook_marks_run_done.)
     conn = db.connect_memory()
     run_id, _ = _seed_run(conn)
     summary = hooks.handle_hook(
-        "Stop",
-        json.dumps({"message": "done"}),
+        "Notification",
+        json.dumps({"message": "fyi"}),
         conn,
         env={"ARCHON_TASK_RUN_ID": run_id},
         paths=None,
