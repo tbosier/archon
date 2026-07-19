@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -247,20 +248,23 @@ def test_foreground_argv_attaches_to_existing_socket_without_original_prompt(
     assert cwd == tmp_path
 
 
-def test_session_host_survives_detach_and_accepts_reconnect(isolated_home, tmp_path):
+def test_session_host_survives_detach_and_accepts_reconnect(isolated_home, tmp_path, monkeypatch):
     sid = "persistent-test"
     state_path = isolated_home.sessions_dir / f"{sid}.json"
     out_path = isolated_home.sessions_dir / f"{sid}.out.log"
+    fake_codex = tmp_path / "codex"
+    fake_codex.write_text(
+        '#!/bin/sh\nprintf "ready:%s" "$1"\nIFS= read -r line\nprintf "\\ngot:%s\\n" "$line"\n',
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
     state_path.write_text(json.dumps({
         "session_id": sid,
         "provider": "codex",
         "cwd": str(tmp_path),
         "prompt": "test persistence",
-        "argv": [
-            "/bin/sh",
-            "-c",
-            'printf ready; IFS= read -r line; printf "\\ngot:%s\\n" "$line"',
-        ],
+        "argv": ["codex", "test persistence"],
         "out_path": str(out_path),
         "err_path": str(isolated_home.sessions_dir / f"{sid}.err.log"),
         "status": "created",

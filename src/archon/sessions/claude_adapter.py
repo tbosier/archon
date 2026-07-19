@@ -15,7 +15,6 @@ hooks (DB attention) for sessions Archon launched, and the registry overlays it.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable

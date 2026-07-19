@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from archon.git_worktree import (
-    WorktreeInfo,
     create_feature_worktree,
     create_pr_review_worktree,
     default_base_branch,

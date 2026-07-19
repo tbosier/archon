@@ -1,0 +1,39 @@
+name: Bug report
+description: Report behavior that is broken or unexpected.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the command you ran and what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can we reproduce it?
+      description: Provide the smallest reliable set of steps.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Archon version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include your OS, Python version, terminal, and provider CLI.
+    validations:
+      required: true
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security check
+      options:
+        - label: This report does not contain credentials or a private security vulnerability.
+          required: true

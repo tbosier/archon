@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from archon import db, statusline
-from archon.models import Task, TaskRun
+from archon.models import TaskRun
 
 
 def _seed_run(conn, run_id="RUN-20260707-001-claude", task_id="TASK-20260707-001"):

@@ -19,6 +19,7 @@ from pathlib import Path
 
 from ..paths import resolve_paths
 from ..util import atomic_write_json, utc_now
+from .launch import KNOWN_PROVIDERS, foreground_command
 
 _HISTORY_LIMIT = 8 * 1024 * 1024
 _PACKET_SIZE = 32 * 1024
@@ -34,10 +35,12 @@ def main(argv: list[str] | None = None) -> int:
     state = _read_state(state_path)
     if state is None:
         return 2
-    command = state.get("argv")
-    if not isinstance(command, list) or not command:
-        _patch_state(state_path, status="failed", summary="provider command is missing", exit_code=2)
+    provider = str(state.get("provider") or "")
+    prompt = state.get("prompt")
+    if provider not in KNOWN_PROVIDERS or not isinstance(prompt, str) or not prompt:
+        _patch_state(state_path, status="failed", summary="invalid provider session state", exit_code=2)
         return 2
+    command = foreground_command(provider, prompt, session_id=args.session_id)
 
     socket_path = _socket_path(args.session_id)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -56,7 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         cwd = state.get("cwd")
         if cwd:
             os.chdir(str(cwd))
-        os.execvpe(str(command[0]), [str(part) for part in command], os.environ.copy())
+        # The executable is selected from KNOWN_PROVIDERS and argv is never shell-evaluated.
+        os.execvp(command[0], command)  # nosemgrep
 
     _set_winsize(master_fd, struct.pack("!II", 24, 80))
     out_path = Path(state.get("out_path") or state_path.with_suffix(".out.log"))

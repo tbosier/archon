@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from textual.widgets import Input, Tree
 
-from archon import attention, dispatcher, planner
+from archon import dispatcher, planner
 from archon.config import default_config
 from archon.tui import planning
 from archon.tui.app import ArchonApp, ConfirmModal, PlanModal, WelcomeScreen

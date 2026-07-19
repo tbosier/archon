@@ -36,7 +36,7 @@ from .paths import resolve_paths
 from .provider_health import check_all
 from .provider_login import login_launch_for
 from .provider_wizard import run_provider_wizard
-from .providers.registry import get_provider, known_provider_ids, known_providers
+from .providers.registry import known_provider_ids, known_providers
 from .util import is_dry_run
 
 app = typer.Typer(

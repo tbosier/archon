@@ -5,7 +5,6 @@ from __future__ import annotations
 import pathlib
 import tempfile
 
-import pytest
 
 from archon import db, dispatcher, planner, reconcile
 from archon.backends.base import WorkerStatus

@@ -6,7 +6,6 @@ import json
 import pathlib
 import tempfile
 
-import pytest
 
 from archon import db, dispatcher, hooks, planner
 from archon.config import default_config

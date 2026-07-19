@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from archon import db, queue, scheduler, taskgraph
+from archon import db, queue, scheduler
 from archon.config import Config, SchedulerConfig
 from archon.models import Repo, TaskRun
 from archon.util import run_id_for
