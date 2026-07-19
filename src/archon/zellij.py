@@ -118,6 +118,44 @@ class Zellij:
             return []
         return _parse_list_panes(proc.stdout)
 
+    def current_tab_id(self, session: str) -> str | None:
+        proc = self._run(self._base(session) + ["current-tab-info", "--json"], capture=True)
+        if proc is None or proc.returncode != 0 or not proc.stdout:
+            return None
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        for key in ("id", "tab_id", "tabId"):
+            value = data.get(key)
+            if value is not None:
+                return str(value)
+        return None
+
+    def new_tab(
+        self,
+        session: str,
+        name: str,
+        cwd: str | None,
+        command: list[str],
+    ) -> str | None:
+        argv = self._base(session) + ["new-tab", "--name", name]
+        if cwd:
+            argv += ["--cwd", cwd]
+        if command:
+            argv += ["--"] + list(command)
+        proc = self._run(argv, capture=True)
+        if proc is None or proc.returncode != 0:
+            return None
+        tab_id = (proc.stdout or "").strip()
+        return tab_id or None
+
+    def focus_tab(self, session: str, tab_id: str) -> bool:
+        proc = self._run(self._base(session) + ["go-to-tab-by-id", str(tab_id)], capture=True)
+        return proc is None or proc.returncode == 0
+
     # -- pane creation ------------------------------------------------------
 
     def new_pane(

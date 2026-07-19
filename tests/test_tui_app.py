@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from textual.widgets import Input, Tree
 
 from archon import attention, dispatcher, planner
@@ -9,6 +10,8 @@ from archon.config import default_config
 from archon.tui import planning
 from archon.tui.app import ArchonApp, ConfirmModal, PlanModal, WelcomeScreen
 from archon.tui.planning import DispatchOutcome
+
+pytestmark = pytest.mark.skip(reason="legacy planner cockpit; archon now opens the unified agent view")
 
 
 def _cfg():

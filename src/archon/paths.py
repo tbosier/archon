@@ -65,6 +65,10 @@ class Paths:
     def transcripts_dir(self) -> Path:
         return self.data_dir / "transcripts"
 
+    @property
+    def sessions_dir(self) -> Path:
+        return self.data_dir / "sessions"
+
     def ensure(self) -> "Paths":
         """Create the directory tree if it does not yet exist."""
         for directory in (
@@ -72,6 +76,7 @@ class Paths:
             self.data_dir,
             self.screens_dir,
             self.transcripts_dir,
+            self.sessions_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
         return self

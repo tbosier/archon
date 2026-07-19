@@ -91,6 +91,19 @@ def append_event_line(path: Path, payload: dict[str, Any]) -> None:
         pass
 
 
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Replace a JSON file atomically so polling readers never see half a write."""
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    try:
+        temp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def redact_env(env: dict[str, str]) -> dict[str, str]:
     """Drop obviously-secret env vars before logging a command."""
     secret = re.compile(r"(TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)", re.IGNORECASE)

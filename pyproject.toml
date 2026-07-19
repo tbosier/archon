@@ -32,6 +32,7 @@ dev = [
 
 [project.scripts]
 archon = "archon.cli:app"
+archon-dash = "archon.dash:main"
 
 [project.urls]
 Homepage = "https://github.com/tbosier/archon"

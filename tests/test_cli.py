@@ -111,15 +111,13 @@ def test_hook_tolerates_garbage():
 
 
 def test_bare_archon_launches_textual_app(monkeypatch):
-    """Bare `archon` (no subcommand) boots the interactive Textual cockpit."""
+    """Bare `archon` (no subcommand) boots the unified agent view."""
     calls = {}
 
-    def fake_run_app(conn, config, ctx=None, **kwargs):
-        calls["conn"] = conn
-        calls["config"] = config
-        calls["ctx"] = ctx
+    def fake_run(**kwargs):
+        calls["ran"] = True
 
-    monkeypatch.setattr("archon.tui.run_app", fake_run_app)
+    monkeypatch.setattr("archon.agent_view.run", fake_run)
     result = runner.invoke(app, [])
     assert result.exit_code == 0, result.stdout
-    assert "conn" in calls and calls["config"] is not None
+    assert calls["ran"] is True

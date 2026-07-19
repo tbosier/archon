@@ -173,3 +173,95 @@ def watch(conn: sqlite3.Connection, *, interval: float = 2.0, console: Console |
                 live.update(render(conn))
     except KeyboardInterrupt:
         console.print("\n[dim]archon: dashboard closed[/dim]")
+
+
+# --------------------------------------------------------------------------- #
+# Cross-provider session dashboard (the pivot's headline view).
+# --------------------------------------------------------------------------- #
+
+def _age(updated_at: str | None) -> str:
+    if not updated_at:
+        return "-"
+    import datetime
+    try:
+        ts = datetime.datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return "-"
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=datetime.timezone.utc)
+    secs = (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds()
+    if secs < 0:
+        return "now"
+    if secs < 90:
+        return f"{int(secs)}s"
+    if secs < 5400:
+        return f"{int(secs // 60)}m"
+    return f"{int(secs // 3600)}h"
+
+
+def render_sessions(sessions) -> Group:
+    """Render the unified cross-provider session list (`archon sessions`)."""
+    from ..sessions.model import summarize, usage_line
+
+    counts = summarize(sessions)
+    usage_bits: list[tuple[str, str]] = []
+    total_cost = sum(s.cost_usd or 0 for s in sessions)
+    total_credits = sum(s.ai_credits or 0 for s in sessions)
+    total_tokens = sum(s.total_tokens or 0 for s in sessions)
+    if total_cost:
+        usage_bits.append((f"${total_cost:.2f}", "yellow"))
+    if total_credits:
+        usage_bits.append((f"{total_credits:g} cr", "yellow"))
+    if total_tokens:
+        from ..sessions.model import _compact_int
+        usage_bits.append((f"{_compact_int(total_tokens)} tok", "yellow"))
+    usage_fragments: list[tuple[str, str]] = []
+    if usage_bits:
+        usage_fragments.append(("usage ", "dim"))
+        for i, bit in enumerate(usage_bits):
+            if i:
+                usage_fragments.append(("  ", "dim"))
+            usage_fragments.append(bit)
+    header = Text.assemble(
+        ("ARCHON", "bold cyan"), ("   ", ""),
+        (f"{counts['working']} working", "green"), ("   ", "dim"),
+        (f"{counts['need_you']} need you", "bold yellow"), ("   ", "dim"),
+        (f"{counts['idle']} idle", "dim"), ("   ", "dim"),
+        (f"{counts['failed']} failed", "red"), ("   ", "dim"),
+        (f"{counts['done']} done", "green"),
+        ("   ", "dim"),
+        *usage_fragments,
+    )
+
+    table = Table(show_header=True, header_style="bold", expand=True, box=None, pad_edge=False)
+    table.add_column("", width=1, no_wrap=True)
+    table.add_column("Session", min_width=20, max_width=42, overflow="ellipsis", no_wrap=True)
+    table.add_column("Provider", width=8, overflow="ellipsis", no_wrap=True)
+    table.add_column("State", width=10, overflow="ellipsis", no_wrap=True)
+    table.add_column("Usage", width=18, overflow="ellipsis", no_wrap=True)
+    table.add_column("Doing", min_width=28, ratio=1, overflow="ellipsis", no_wrap=True)
+    table.add_column("Age", width=5, overflow="ellipsis", no_wrap=True)
+    for s in sessions:
+        glyph, color = s.glyph
+        usage = usage_line(s)
+        table.add_row(
+            Text(glyph, style=f"bold {color}"),
+            Text(s.title or s.repo or s.session_id, style="bold"),
+            Text(s.provider.upper(), style="cyan"),
+            Text(s.label, style=("bold yellow" if s.needs_attention else color)),
+            Text(usage or "-", style=("yellow" if usage else "dim")),
+            Text(s.summary or "-", style="dim"),
+            Text(_age(s.updated_at), style="dim"),
+        )
+    if not sessions:
+        table.add_row("", Text("(no agent sessions discovered)", style="dim"), "", "", "", "", "")
+
+    return Group(
+        Panel.fit(header, border_style="cyan"),
+        table,
+        Text("discovered from Claude / Codex / Copilot / Archon", style="dim"),
+    )
+
+
+def show_sessions(sessions, console: Console | None = None) -> None:
+    (console or Console()).print(render_sessions(sessions))

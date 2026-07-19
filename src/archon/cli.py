@@ -42,14 +42,14 @@ from .util import is_dry_run
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=False,
-    help="Archon — an orchestration brain for parallel AI coding agents.",
+    help="Archon — one terminal view for Claude, Codex, Copilot, and other coding agents.",
 )
 providers_app = typer.Typer(no_args_is_help=True, help="Inspect and manage provider CLIs.")
 jobs_app = typer.Typer(no_args_is_help=True, help="Create and inspect control-center jobs.")
 attention_app = typer.Typer(no_args_is_help=True, help="Inspect and resolve attention items.")
 app.add_typer(providers_app, name="providers")
-app.add_typer(jobs_app, name="jobs")
-app.add_typer(attention_app, name="attention")
+app.add_typer(jobs_app, name="jobs", hidden=True)
+app.add_typer(attention_app, name="attention", hidden=True)
 
 console = Console()
 err = Console(stderr=True)
@@ -57,19 +57,11 @@ err = Console(stderr=True)
 
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
-    """Launch the interactive Textual cockpit when `archon` runs bare."""
+    """Launch the unified agent view when `archon` runs bare."""
     if ctx.invoked_subcommand is not None:
         return
-    _, conn, config = _open()
-    _sync_providers_to_db(conn, config)
-    repo_ctx = None
-    try:
-        repo_ctx = dispatcher.register_repo(conn, dispatcher.resolve_repo_context(None, config=config))
-    except Exception:
-        # Not inside a git repo — the app still shows the read-only dashboard.
-        pass
-    from . import tui as _tui
-    _tui.run_app(conn, config, repo_ctx)
+    from .agent_view import run
+    run()
 
 
 # --------------------------------------------------------------------------- #
@@ -196,7 +188,7 @@ def setup(
     console.print(f"[green]saved providers:[/green] {', '.join(config.enabled_provider_ids()) or '(none)'}")
 
 
-@app.command()
+@app.command(hidden=True)
 def server(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(8716, "--port"),
@@ -211,7 +203,7 @@ def server(
     uvicorn.run("archon.api:app", host=host, port=port, reload=reload)
 
 
-@app.command()
+@app.command(hidden=True)
 def web(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(8716, "--port"),
@@ -221,7 +213,7 @@ def web(
     server(host=host, port=port, reload=reload)
 
 
-@app.command()
+@app.command(hidden=True)
 def up(
     repo: Optional[Path] = typer.Option(None, help="Repository root."),
     session: Optional[str] = typer.Option(None, help="Legacy session name stored with the repo."),
@@ -472,7 +464,7 @@ def attention_resolve(
 # Tasks
 # --------------------------------------------------------------------------- #
 
-@app.command("do")
+@app.command("do", hidden=True)
 def do_cmd(
     message: str,
     repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Repository root."),
@@ -546,7 +538,7 @@ def do_cmd(
     console.print(f"dispatched={decision.dispatched or '-'}  skipped={decision.skipped or '-'}")
 
 
-@app.command("review-pr")
+@app.command("review-pr", hidden=True)
 def review_pr(
     pr_number: int,
     repo: Optional[Path] = typer.Option(None),
@@ -574,7 +566,7 @@ def review_pr(
     _print_dispatch(result, dry)
 
 
-@app.command()
+@app.command(hidden=True)
 def feature(
     name: str,
     repo: Optional[Path] = typer.Option(None),
@@ -645,15 +637,48 @@ def _print_dispatch(result: dispatcher.DispatchResult, dry: bool) -> None:
 # --------------------------------------------------------------------------- #
 
 @app.command()
-def dashboard() -> None:
-    """The command center: live view of every agent across all repos, one screen."""
-    _, conn, config = _open()
-    _sync_providers_to_db(conn, config)
-    from . import tui
-    tui.watch(conn)
+def agents() -> None:
+    """Open the unified multi-provider agent view."""
+    from .agent_view import run
+    run()
 
 
 @app.command()
+def dashboard() -> None:
+    """Open the unified agent dashboard."""
+    from .agent_view import run
+    run()
+
+
+@app.command()
+def sessions(
+    watch: bool = typer.Option(False, "--watch", help="Refresh on an interval."),
+    interval: float = typer.Option(2.0, "--interval"),
+) -> None:
+    """Unified view of every agent session — Claude, Copilot, and Archon's own.
+
+    Discovers sessions you launched yourself (from each CLI's on-disk state), not
+    just ones Archon dispatched, and shows which need you.
+    """
+    _, conn, _ = _open()
+    from . import tui
+    from .sessions import default_registry
+
+    registry = default_registry(conn)
+    if not watch:
+        tui.show_sessions(registry.snapshot(), console)
+        return
+    import time as _time
+    try:
+        while True:
+            console.clear()
+            tui.show_sessions(registry.snapshot(), console)
+            _time.sleep(interval)
+    except KeyboardInterrupt:
+        console.print("\n[dim]archon: sessions view closed[/dim]")
+
+
+@app.command(hidden=True)
 def status(watch: bool = typer.Option(False, "--watch")) -> None:
     """Show provider readiness and task-run state (all repos)."""
     _, conn, config = _open()
@@ -665,7 +690,7 @@ def status(watch: bool = typer.Option(False, "--watch")) -> None:
         tui.show_once(conn, console)
 
 
-@app.command()
+@app.command(hidden=True)
 def tui(inside_zellij: bool = typer.Option(False, "--inside-zellij", hidden=True)) -> None:
     """Live dashboard (Ctrl-C to exit)."""
     _, conn, config = _open()
@@ -674,7 +699,7 @@ def tui(inside_zellij: bool = typer.Option(False, "--inside-zellij", hidden=True
     _tui.watch(conn)
 
 
-@app.command()
+@app.command(hidden=True)
 def focus(selector: str) -> None:
     """Print the backend attach command for a task/run selector."""
     _, conn, config = _open()
@@ -689,7 +714,7 @@ def focus(selector: str) -> None:
     console.print(" ".join(backend.attach_command(handle)))
 
 
-@app.command()
+@app.command(hidden=True)
 def stop(
     selector: str,
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
@@ -720,7 +745,7 @@ def _find_run(conn, selector: str):
     return None
 
 
-@app.command()
+@app.command(hidden=True)
 def search(query: str, since: Optional[str] = typer.Option(None, "--since")) -> None:
     """Full-text search across transcripts and logs."""
     _, conn, _ = _open()
@@ -734,7 +759,7 @@ def search(query: str, since: Optional[str] = typer.Option(None, "--since")) -> 
             console.print(f"  [dim]{h['excerpt']}[/dim]")
 
 
-@app.command()
+@app.command(hidden=True)
 def touched(file_path: str) -> None:
     """Show task runs that touched a file."""
     _, conn, _ = _open()
@@ -750,7 +775,7 @@ def touched(file_path: str) -> None:
 # Queue / scheduler / budget
 # --------------------------------------------------------------------------- #
 
-@app.command("queue")
+@app.command("queue", hidden=True)
 def queue_cmd() -> None:
     """Show queued and ready tasks."""
     _, conn, _ = _open()
@@ -765,7 +790,7 @@ def queue_cmd() -> None:
         console.print(f"  {t['id']}  {t['phase']:<7} {t['name']:<28} {t['provider_id'] or '-':<8} {state}")
 
 
-@app.command()
+@app.command(hidden=True)
 def graph() -> None:
     """Render the task dependency graph (plan → execute → review → test)."""
     _, conn, _ = _open()
@@ -776,7 +801,7 @@ def graph() -> None:
     console.print(text if text.strip() else "[dim]no tasks yet[/dim]")
 
 
-@app.command("budget")
+@app.command("budget", hidden=True)
 def budget_cmd() -> None:
     """Show the current budget / rate-limit status and dispatch action."""
     _, conn, config = _open()
@@ -785,7 +810,7 @@ def budget_cmd() -> None:
     console.print(f"[{color.get(status.action,'white')}]{budget.describe(status)}[/]")
 
 
-@app.command()
+@app.command(hidden=True)
 def schedule(
     watch: bool = typer.Option(False, "--watch", help="Keep dispatching on an interval."),
     interval: float = typer.Option(3.0, "--interval"),
@@ -817,7 +842,7 @@ def schedule(
         console.print("\n[dim]scheduler stopped[/dim]")
 
 
-@app.command()
+@app.command(hidden=True)
 def complete(
     selector: str,
     dry_run: bool = typer.Option(False, "--dry-run"),
@@ -839,7 +864,7 @@ def complete(
         console.print(f"  [dim]dispatched next:[/dim] {', '.join(d.dispatched)}")
 
 
-@app.command()
+@app.command(hidden=True)
 def pause() -> None:
     """Pause the scheduler (no new dispatches until resumed)."""
     _, conn, _ = _open()
@@ -847,7 +872,7 @@ def pause() -> None:
     console.print("[yellow]scheduler paused[/yellow]")
 
 
-@app.command()
+@app.command(hidden=True)
 def resume() -> None:
     """Resume the scheduler."""
     _, conn, _ = _open()
@@ -866,13 +891,13 @@ def _find_task(conn, selector: str):
 # Provider integration entry points (called by statuslines/hooks)
 # --------------------------------------------------------------------------- #
 
-@app.command(name="statusline")
+@app.command(name="statusline", hidden=True)
 def statusline_cmd() -> None:
     """Read provider statusline JSON from stdin; print a one-line status."""
     statusline.main()
 
 
-@app.command()
+@app.command(hidden=True)
 def hook(hook_name: str) -> None:
     """Ingest a provider hook payload from stdin."""
     hooks.main(hook_name)
