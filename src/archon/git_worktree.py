@@ -313,7 +313,9 @@ def get_git_state(worktree: Path) -> GitState:
         branch = None
 
     # Dirty? Any staged/unstaged/untracked change shows up in porcelain output.
-    status = _git(worktree, ["status", "--porcelain"])
+    # Override status.showUntrackedFiles from the user's global Git config so
+    # safety checks never mistake a worktree with untracked files for clean.
+    status = _git(worktree, ["status", "--porcelain", "--untracked-files=all"])
     dirty = bool(status.stdout.strip()) if status.returncode == 0 else False
 
     # Ahead/behind vs upstream, if one is configured.

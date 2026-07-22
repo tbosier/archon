@@ -7,11 +7,12 @@ import fcntl
 import os
 import select
 import signal
-import socket
 import struct
 import sys
 import termios
 import tty
+
+from .socket_protocol import FramedSocket
 
 
 LEFT_ARROW = b"\x1b[D"
@@ -21,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", required=True)
     args = parser.parse_args(argv)
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    client = FramedSocket()
     try:
         client.connect(args.socket)
     except OSError as exc:
@@ -40,13 +41,14 @@ def main(argv: list[str] | None = None) -> int:
             readable, _, _ = select.select([sys.stdin.fileno(), client], [], [])
             if client in readable:
                 try:
-                    packet = client.recv(65536)
+                    packets, disconnected = client.receive()
                 except OSError:
                     break
-                if not packet:
+                if disconnected:
                     break
-                if packet[:1] == b"O":
-                    os.write(sys.stdout.fileno(), packet[1:])
+                for packet in packets:
+                    if packet[:1] == b"O":
+                        os.write(sys.stdout.fileno(), packet[1:])
             if sys.stdin.fileno() in readable:
                 data = os.read(sys.stdin.fileno(), 4096)
                 if not data:
@@ -57,7 +59,7 @@ def main(argv: list[str] | None = None) -> int:
                     return 0
                 if LEFT_ARROW.startswith(pending) and len(pending) < len(LEFT_ARROW):
                     continue
-                client.sendall(b"I" + pending)
+                client.send(b"I", pending)
                 pending = b""
     finally:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_attrs)
@@ -65,13 +67,13 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _send_winsize(client: socket.socket) -> None:
+def _send_winsize(client: FramedSocket) -> None:
     for source in (sys.stdin.fileno(), sys.stdout.fileno(), sys.stderr.fileno()):
         try:
             size = fcntl.ioctl(source, termios.TIOCGWINSZ, b"\0" * 8)
             rows, cols, _, _ = struct.unpack("HHHH", size)
             if rows and cols:
-                client.sendall(b"W" + struct.pack("!II", rows, cols))
+                client.send(b"W", struct.pack("!II", rows, cols))
                 return
         except (OSError, struct.error):
             continue

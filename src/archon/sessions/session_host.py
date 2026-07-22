@@ -20,6 +20,7 @@ from pathlib import Path
 from ..paths import resolve_paths
 from ..util import atomic_write_json, utc_now
 from .launch import KNOWN_PROVIDERS, foreground_command
+from .socket_protocol import FramedSocket
 
 _HISTORY_LIMIT = 8 * 1024 * 1024
 _PACKET_SIZE = 32 * 1024
@@ -43,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     command = foreground_command(provider, prompt, session_id=args.session_id)
 
     socket_path = _socket_path(args.session_id)
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         socket_path.unlink(missing_ok=True)
         server.bind(str(socket_path))
@@ -66,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     out_path = Path(state.get("out_path") or state_path.with_suffix(".out.log"))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     history = bytearray()
-    client: socket.socket | None = None
+    client: FramedSocket | None = None
     _patch_state(
         state_path,
         pid=os.getpid(),
@@ -89,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
                     incoming, _ = server.accept()
                     if client is not None:
                         client.close()
-                    client = incoming
+                    client = FramedSocket(incoming)
                     _send_output(client, b"\x1b[2J\x1b[H")
                     for offset in range(0, len(history), _PACKET_SIZE):
                         _send_output(client, bytes(history[offset:offset + _PACKET_SIZE]))
@@ -116,24 +117,30 @@ def main(argv: list[str] | None = None) -> int:
 
                 if client is not None and client in readable:
                     try:
-                        packet = client.recv(65536)
+                        packets, disconnected = client.receive()
                     except OSError:
-                        packet = b""
-                    if not packet:
+                        packets, disconnected = [], True
+                    if disconnected:
                         client.close()
                         client = None
                         _patch_state(state_path, attached=False)
-                    elif packet[:1] == b"I":
-                        try:
-                            os.write(master_fd, packet[1:])
-                        except OSError:
+                    else:
+                        provider_input_failed = False
+                        for packet in packets:
+                            if packet[:1] == b"I":
+                                try:
+                                    os.write(master_fd, packet[1:])
+                                except OSError:
+                                    provider_input_failed = True
+                                    break
+                            elif packet[:1] == b"W" and len(packet) == 9:
+                                _set_winsize(master_fd, packet[1:])
+                                try:
+                                    os.kill(pid, signal.SIGWINCH)
+                                except OSError:
+                                    pass
+                        if provider_input_failed:
                             break
-                    elif packet[:1] == b"W" and len(packet) == 9:
-                        _set_winsize(master_fd, packet[1:])
-                        try:
-                            os.kill(pid, signal.SIGWINCH)
-                        except OSError:
-                            pass
 
                 waited, status = os.waitpid(pid, os.WNOHANG)
                 if waited == pid:
@@ -187,10 +194,10 @@ def _set_winsize(master_fd: int, packed_size: bytes) -> None:
         pass
 
 
-def _send_output(client: socket.socket, data: bytes) -> bool:
+def _send_output(client: FramedSocket, data: bytes) -> bool:
     for offset in range(0, len(data), _PACKET_SIZE):
         try:
-            client.sendall(b"O" + data[offset:offset + _PACKET_SIZE])
+            client.send(b"O", data[offset:offset + _PACKET_SIZE])
         except OSError:
             return False
     return True

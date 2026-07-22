@@ -166,6 +166,10 @@ def test_get_git_state_clean_then_dirty(tmp_path):
 
 def test_get_git_state_untracked_is_dirty(tmp_path):
     repo = _init_repo(tmp_path / "myrepo")
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "status.showUntrackedFiles", "no"],
+        check=True,
+    )
     (repo / "newfile.txt").write_text("x\n")
     assert get_git_state(repo).dirty is True
 

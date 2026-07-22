@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -17,6 +16,7 @@ from archon.agent_view import AgentView, ProviderPicker
 from archon.sessions import ArchonSessionAdapter, SessionRegistry
 from archon.sessions.control import tail_logs
 from archon.sessions.launch import launch_agent
+from archon.sessions.socket_protocol import FramedSocket
 
 
 @pytest.fixture(autouse=True)
@@ -287,7 +287,7 @@ def test_session_host_survives_detach_and_accepts_reconnect(isolated_home, tmp_p
         else:
             pytest.fail("session host did not create its attach socket")
 
-        first = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        first = FramedSocket()
         first.settimeout(2)
         first.connect(state["socket_path"])
         assert b"ready" in _recv_agent_output(first, expected=b"ready")
@@ -295,10 +295,10 @@ def test_session_host_survives_detach_and_accepts_reconnect(isolated_home, tmp_p
         first = None
         assert host.poll() is None
 
-        second = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        second = FramedSocket()
         second.settimeout(2)
         second.connect(state["socket_path"])
-        second.sendall(b"Ihello\n")
+        second.send(b"I", b"hello\n")
         assert b"got:hello" in _recv_agent_output(second, expected=b"got:hello")
         assert host.wait(timeout=2) == 0
         final = json.loads(state_path.read_text(encoding="utf-8"))
@@ -313,12 +313,13 @@ def test_session_host_survives_detach_and_accepts_reconnect(isolated_home, tmp_p
             host.wait(timeout=2)
 
 
-def _recv_agent_output(client: socket.socket, *, expected: bytes) -> bytes:
+def _recv_agent_output(client: FramedSocket, *, expected: bytes) -> bytes:
     output = bytearray()
     while expected not in output:
-        packet = client.recv(65536)
-        if not packet:
+        packets, disconnected = client.receive()
+        if disconnected:
             break
-        if packet[:1] == b"O":
-            output.extend(packet[1:])
+        for packet in packets:
+            if packet[:1] == b"O":
+                output.extend(packet[1:])
     return bytes(output)
