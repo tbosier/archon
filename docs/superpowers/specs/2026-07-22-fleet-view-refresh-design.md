@@ -11,96 +11,93 @@ transparent UI that lets the user's terminal (kitty) background show through
 instead of painting a predetermined background. Brand accents come from the
 Archon brand sheet (cyan `#22D3EE`, cream `#F5F5EB`).
 
-Scope is the interactive Textual cockpit (`archon` with no args) plus the mascot
-module. The legacy Rich snapshot tables (`archon status` / `archon up`) are left
-unchanged to keep this focused.
+Scope is the **unified agent view** — the surface `archon` (no args) actually
+opens — plus the mascot module.
 
 ## Current state
 
-- `src/archon/tui/app.py` — Textual `App`. Header (`#topbar`) is a single line of
-  text `ARCHON · repo · budget`, styled with `_ACCENT = "cyan"` (an ANSI name).
-  The spartan mascot in `mascot.py` is never wired in. `WelcomeScreen` shows a
-  text-only resume summary.
-- `src/archon/tui/styles.tcss` — paints backgrounds: `Screen { background:
-  $background }`, plus `$panel`/`$surface` fills on `#topbar`, `#detail`,
-  `#attention`, `#command`, and the modals. This is the "predetermined
-  background" the user wants gone.
-- `mascot.py` (repo root) — half-block pixel-art renderer with owl, helmet, and
-  spartan grids, plus `brand_mascot_text()` (cyan plume `#22D3EE`, cream body
-  `#F5F5EB`). Not importable from the `archon` package (lives outside `src/`).
+- The `archon` no-args entrypoint (`cli.py:59-63`, `@app.callback`) calls
+  `agent_view.run`. **`src/archon/agent_view.py` (`AgentView`) is the real
+  surface**, not the legacy `tui/app.py` cockpit (whose smoke tests are skipped
+  with "archon now opens the unified agent view").
+- `AgentView` has an **inline `CSS` string** (not a `.tcss` file). It paints
+  `Screen { background: $background }`, `#topbar { background: $panel }`,
+  `#command { background: $panel }`, and a `$accent`-tinted `#sessions`
+  highlight — the "predetermined background" to remove.
+- `AgentView._render_topbar` (agent_view.py:306-321) **already renders a
+  Claude-style status line**: `ARCHON  N running  N need assistance  N
+  completed  N failed  <cwd>`, using `summarize(sessions)` →
+  `{"working","need_you","failed","done","idle","disconnected"}` (ints). The
+  `#topbar` is a single 1-row `Static`. No mascot.
+- Empty state: when there are no sessions, `refresh_sessions` appends one
+  `ListItem` with `Static(Text("No sessions yet. Type a task below.", ...))` —
+  this is the idle moment for a large mascot.
+- `mascot.py` (repo root) — half-block pixel-art renderer with spartan grids and
+  `brand_mascot_text()` (cyan plume `#22D3EE`, cream body `#F5F5EB`). Lives
+  outside `src/`, so it is **not importable** from the `archon` package.
 - `spartan_final.png` (repo root) — brand reference image. Keep as-is.
-- Textual version is 8.2.8, which ships `ansi-dark` / `ansi-light` themes with
-  `ansi=True` (renders the Screen background as the terminal default → terminal
-  wallpaper shows through).
+- Textual is 8.2.8, which ships `ansi-dark` themes with `ansi=True` (renders the
+  Screen background as the terminal default → terminal wallpaper shows through).
+- Active tests live in `tests/test_agent_view.py` (Pilot `run_test()` harness).
+  The legacy `tests/test_tui_app.py` is skipped.
 
 ## Design
 
-### 1. Terminal-background pass-through (theme + styles)
+### 1. Terminal-background pass-through (theme + CSS)
 
-- On mount, set `self.theme = "ansi-dark"`. With `ansi=True`, unset/default cells
-  emit the terminal's default background, so kitty transparency shows through.
-- In `styles.tcss`, set `background: transparent` on `Screen`, `#topbar`,
-  `#banner` (keep its error tint only via border/text), `#attention`, `#jobs`,
-  `#detail`, and `#command`. Replace panel-fill separation with thin borders in
-  brand cyan `#22D3EE` (e.g. `border-right`/`border-bottom`).
-- Use explicit truecolor brand values for foreground elements so they stay exact
+- In `AgentView.on_mount`, set `self.theme = "ansi-dark"`. With `ansi=True`,
+  unset/default cells emit the terminal's default background, so kitty
+  transparency shows through.
+- In the inline `CSS`, set `background: transparent` on `Screen`, `#topbar`,
+  `#command`, and `#sessions`. Replace panel-fill separation with thin borders in
+  brand cyan `#22D3EE` (e.g. `#topbar { border-bottom: solid #22d3ee }`,
+  `#command { border: tall #22d3ee }`). The `#sessions` highlight uses a cyan
+  tint (`#22d3ee 25%`) which composites fine over the transparent base.
+- Use explicit truecolor brand values for foreground so they stay exact
   regardless of the ANSI base:
-  - accent / primary: `#22D3EE`
-  - foreground text: `#F5F5EB`
-  - muted / secondary: `#9AA1A9`
-- Change the Python constant `_ACCENT = "cyan"` → `_ACCENT = "#22d3ee"`.
-- **Readability exception:** modal dialogs (`PlanModal`, `AnswerModal`,
-  `WelcomeScreen`) keep a solid fill (`#0E1014` from the brand sheet, or a near-
-  opaque panel) so their text is readable over a busy wallpaper. They are
-  bordered in cyan. This is intentional and does not apply to the main surfaces.
+  - accent: `#22D3EE`, foreground text: `#F5F5EB`, muted: `#9AA1A9`.
+- Add module constants `_ACCENT = "#22d3ee"`, `_CREAM = "#f5f5eb"`,
+  `_MUTED = "#9aa1a9"` and use them where the code currently hardcodes `"cyan"`
+  (topbar wordmark, `_session_line` provider column).
+- **Readability exception:** the `ProviderPicker` modal keeps a solid fill
+  (`#0E1014` from the brand sheet) so its text stays readable over a busy
+  wallpaper; bordered in cyan. This exception does not apply to the main
+  surfaces.
 
 ### 2. Mascot + header (fleet-view look)
 
-Rebuild the header into a compact band (~3 rows) that mirrors Claude Code:
+Grow `#topbar` from 1 row to a 2-row band that mirrors Claude Code:
 
 ```
-▟█▙  ARCHON   agent command center · <repo>
-▜█▛  1 awaiting input · 0 working · 3 completed          <budget> [<action>]
+▟█▙  ARCHON   0 awaiting input · 1 working · 3 completed        <cwd>
+▜█▛
 ```
 
-- **Mascot:** add a compact `spartan_tiny` grid to `mascot.py` — 4 grid rows = 2
-  terminal rows (matching Claude Code's small mascot), cyan plume + cream body,
-  rendered with `brand_mascot_text("spartan_tiny")`. Placed at the header's left.
-- **Wordmark:** `ARCHON` in bold `#22D3EE`, with a dim subtitle
-  `agent command center · <repo>` (repo = `ctx.name` or `no-repo`).
-- **Status counts line:** `N awaiting input · N working · N completed`, computed
-  from the snapshot:
-  - `awaiting` = number of attention rows that need the user (plan approvals +
-    permission requests) — i.e. `len(snap.attention)`.
-  - `working` = tasks whose status is in `models._HEALTH_WORKING`
-    (`{"running", "starting"}`) across all jobs.
-  - `completed` = tasks whose status is in `models._HEALTH_DONE`
-    (`{"done", "ready"}`) across all jobs. The canonical terminal status string
-    is `"done"` (there is no `"completed"` status in the model).
-  Budget summary (`snap.header_budget`) and policy action (`snap.budget_action`,
-  colored) are right-aligned on the same line.
-- A small snapshot helper computes the three counts so both the header and the
-  existing `_maybe_welcome` logic can share it. Implemented in
-  `src/archon/tui/data.py` (e.g. `Snapshot.status_counts()` returning
-  `(awaiting, working, completed)`), reusing the running-count logic already in
-  `_maybe_welcome`.
+- **Compose change:** replace the single `#topbar` Static with a `Horizontal`
+  `#topbar` containing a `#mascot` Static (2 lines) and a `#brand` Static (the
+  wordmark + status line).
+- **Mascot:** add a compact `spartan_tiny` grid to the mascot module — 4 grid
+  rows = 2 terminal rows (Claude Code's small-mascot size), cyan plume + cream
+  body, rendered via `brand_mascot_text("spartan_tiny")`. Set once on mount into
+  `#mascot`.
+- **Status line:** keep the existing counts from `summarize()` but relabel to the
+  Claude phrasing and brand palette:
+  `ARCHON   {need_you} awaiting input · {working} working · {done} completed`,
+  then `· {failed} failed` appended only when `failed > 0`, then the `<cwd>` dim.
+  `_render_topbar` updates `#brand` each poll; `#mascot` is static.
 
-**Layout mechanism:** `#topbar` becomes a `Horizontal` container holding a
-`#mascot` Static (2 lines) and a `#brand` Static (2 lines: wordmark line +
-status line). `_render_topbar` updates `#brand` each poll with current counts;
-`#mascot` is static and set once on mount. Header height grows from 1 to 3.
+### 3. Big spartan on the idle / empty state
 
-### 3. Big spartan on the welcome / idle screen
-
-`WelcomeScreen` gains the large `SPARTAN` helmet (`brand_mascot_text("spartan")`)
-centered at the top with the `ARCHON` wordmark beneath/beside it, above the
-existing "resume prior work" summary. Dialog keeps a solid fill (see readability
-exception) so the art and text read cleanly.
+When `self._sessions` is empty, replace the plain "No sessions yet" line with a
+single `ListItem` whose `Static` stacks the large `brand_mascot_text("spartan")`
+helmet, the `ARCHON` wordmark, and the hint "No sessions yet — describe a task
+below and end with --claude, --codex, or --copilot." Keeping it one `ListItem`
+preserves the existing child-count semantics the tests rely on.
 
 ### 4. mascot.py home
 
 - Move the canonical mascot code to `src/archon/mascot.py` so the package can
-  `from .. import mascot` / `from ..mascot import brand_mascot_text`.
+  `from . import mascot` / `from .mascot import brand_mascot_text`.
 - Root `mascot.py` becomes a thin re-export shim so the file still exists in root
   and runs standalone against the installed (editable) package:
 
@@ -113,32 +110,33 @@ exception) so the art and text read cleanly.
 
 ## Testing
 
-- `mascot.py`: unit test that `brand_mascot_text("spartan_tiny")` renders 2 lines
-  of half-block Text without error, and that the root shim re-exports the same
-  callables as `archon.mascot` (identity check).
-- `data.py`: unit test for `Snapshot.status_counts()` on a fixture snapshot with
-  a known mix of awaiting/working/completed → exact tuple.
-- `app.py` (`test_tui_app.py`): existing tests must still pass; add/adjust a test
-  that the header (`#topbar`) contains the mascot Static and a status-count line,
-  and that `self.theme == "ansi-dark"` after mount.
-- Manual verification: run `archon` in a kitty terminal with a transparent/
-  wallpapered background and confirm the wallpaper shows through and the spartan
-  header + welcome render correctly.
+- **mascot** (`tests/test_mascot.py`, new): `brand_mascot_text("spartan_tiny")`
+  renders exactly 2 lines of half-block `Text` without error; the root shim
+  exposes the same `brand_mascot_text` object as `archon.mascot`
+  (identity check).
+- **agent_view** (`tests/test_agent_view.py`): existing tests must still pass.
+  Add a test that, after mount with sessions present, `#topbar` contains a
+  `#mascot` Static whose render is non-empty and a `#brand` Static whose text
+  contains "awaiting input" and "completed"; and that `app.theme == "ansi-dark"`.
+  Add a test that with zero sessions the `#sessions` ListView has exactly one
+  child (the idle mascot item).
+- **Manual:** run `archon` in a kitty terminal with a transparent/wallpapered
+  background; confirm the wallpaper shows through and the spartan header + idle
+  mascot render correctly.
 
 ## Non-goals
 
-- No changes to the legacy Rich tables (`archon status`, `archon up`,
-  `archon providers`) or `dash.py`.
-- No new mascot animation; static art only.
+- No changes to the legacy `tui/app.py` cockpit, `styles.tcss`, or `dash.py`.
+- No changes to `summarize()`'s returned keys (only its presentation).
+- No mascot animation; static art only.
 - No change to `spartan_final.png` or the SVG brand marks.
 
 ## Files touched
 
 - `src/archon/mascot.py` — new canonical module (moved from root).
-- `mascot.py` (root) — becomes re-export shim; gains nothing else.
-- `src/archon/tui/app.py` — set ansi theme, rebuild header compose + render,
-  `_ACCENT`, welcome-screen big spartan.
-- `src/archon/tui/styles.tcss` — transparent backgrounds, cyan borders, header
-  layout, modal fill exception.
-- `src/archon/tui/data.py` — `Snapshot.status_counts()` helper.
-- `tests/` — `test_tui_app.py`, `test_tui_data.py`, and a mascot test.
+- `mascot.py` (root) — becomes re-export shim; add `spartan_tiny` grid to the
+  canonical module.
+- `src/archon/agent_view.py` — set ansi theme; brand-color constants; restructure
+  `#topbar` compose into mascot + brand; relabel status line; big-spartan idle
+  state; solid `ProviderPicker` fill.
+- `tests/test_mascot.py` (new), `tests/test_agent_view.py` (added cases).
